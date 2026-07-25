@@ -1,8 +1,31 @@
+import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../database/connection';
 import { parseCIDR, generateIPv6, registerIPv6Address, forceUnregisterIPv6Address } from '../utils/ipv6';
 import { getLogger } from '../utils/logger';
 import { getActiveSessions, forceDisconnect } from './sessions';
+
+/** Pick subnet for this connect. Sticky reuses existing sticky subnet; random picks among bindings. */
+export function pickSubnetId(
+  userId: string,
+  subnetIds: string[],
+  mode: 'sticky' | 'random'
+): string {
+  if (subnetIds.length === 0) {
+    throw new Error('No active subnet bindings');
+  }
+  if (mode === 'sticky') {
+    const db = getDb();
+    const placeholders = subnetIds.map(() => '?').join(',');
+    const existing = db.prepare(
+      `SELECT subnet_id FROM sticky_bindings
+       WHERE user_id = ? AND subnet_id IN (${placeholders})
+       ORDER BY bound_at ASC LIMIT 1`
+    ).get(userId, ...subnetIds) as { subnet_id: string } | undefined;
+    if (existing) return existing.subnet_id;
+  }
+  return subnetIds[crypto.randomInt(subnetIds.length)];
+}
 
 export function allocateForUser(
   userId: string,

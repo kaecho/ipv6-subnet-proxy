@@ -2,7 +2,7 @@ import net from 'net';
 import crypto from 'crypto';
 import { getLogger } from '../utils/logger';
 import { verifyCredentials } from '../core/users';
-import { allocateForUser } from '../core/ip-allocator';
+import { allocateForUser, pickSubnetId } from '../core/ip-allocator';
 import {
   createSession,
   setTargetSocket,
@@ -166,7 +166,11 @@ export function createSocks5Server(port: number): net.Server {
         return;
       }
 
-      const subnetId = bindings[crypto.randomInt(bindings.length)].subnet_id;
+      const subnetId = pickSubnetId(
+        userId,
+        bindings.map((b) => b.subnet_id),
+        mode
+      );
 
       let ipv6Addr: string;
       try {
