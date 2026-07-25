@@ -19,15 +19,16 @@ async function main(): Promise<void> {
   runMigrations(db);
   log.info({ dbPath: config.dbPath }, 'Database initialized');
 
-  // Auto-detect IPv6 subnets from host interfaces
-  log.info('Scanning network interfaces for IPv6 subnets...');
-  const detectedSubnets = detectIPv6Subnets();
-  log.info({ count: detectedSubnets.length, subnets: detectedSubnets },
-    detectedSubnets.length > 0
-      ? 'IPv6 subnet detection complete'
-      : 'No IPv6 subnets detected on host interfaces');
+  // Auto-detect only when DEFAULT_SUBNET is not set (env is authoritative).
+  let detectedSubnets: string[] = [];
+  if (!config.defaultSubnet) {
+    log.info('Scanning network interfaces for IPv6 subnets...');
+    detectedSubnets = detectIPv6Subnets();
+    log.info({ count: detectedSubnets.length, subnets: detectedSubnets },
+      detectedSubnets.length > 0
+        ? 'IPv6 subnet detection complete'
+        : 'No IPv6 subnets detected on host interfaces');
 
-  if (detectedSubnets.length > 0) {
     for (const cidr of detectedSubnets) {
       try {
         addSubnet(cidr);
@@ -40,6 +41,8 @@ async function main(): Promise<void> {
         }
       }
     }
+  } else {
+    log.info({ cidr: config.defaultSubnet }, 'DEFAULT_SUBNET set; skipping interface auto-detect');
   }
 
   // Also register default subnet from env if provided (supplementary)

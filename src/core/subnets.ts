@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import net from 'net';
 import { getDb } from '../database/connection';
-import { parseCIDR, generateIPv6 } from '../utils/ipv6';
+import { parseCIDR, generateIPv6, normalizeCIDR } from '../utils/ipv6';
 import { getLogger } from '../utils/logger';
 
 export interface Subnet {
@@ -25,18 +25,19 @@ function rowToSubnet(row: any): Subnet {
 export function addSubnet(cidr: string, gateway?: string): Subnet {
   const db = getDb();
   const log = getLogger();
-  parseCIDR(cidr); // validate
+  const normalized = normalizeCIDR(cidr); // validate + compress
 
   const id = uuidv4();
   const now = new Date().toISOString();
 
   db.prepare(
     'INSERT INTO subnets (id, cidr, gateway, status, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, cidr, gateway || null, 'active', now);
+  ).run(id, normalized, gateway || null, 'active', now);
 
-  log.info({ subnetId: id, cidr }, 'Subnet added');
-  return { id, cidr, gateway: gateway || null, status: 'active', created_at: now };
+  log.info({ subnetId: id, cidr: normalized }, 'Subnet added');
+  return { id, cidr: normalized, gateway: gateway || null, status: 'active', created_at: now };
 }
+
 
 export function getSubnet(id: string): Subnet | null {
   const db = getDb();

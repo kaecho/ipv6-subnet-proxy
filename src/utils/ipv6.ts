@@ -47,6 +47,35 @@ export function parseCIDR(cidr: string): ParsedCIDR {
   return { prefix: padded.join(':'), prefixLength };
 }
 
+/** Compress full 8-hextet IPv6 to canonical form (2001:470:ef3f::). */
+export function compressIPv6(addr: string): string {
+  const hextets = addr.includes(':') && !addr.includes('::')
+    ? addr.split(':').map(h => (parseInt(h || '0', 16) || 0).toString(16))
+    : parseCIDR(`${addr}/128`).prefix.split(':').map(h => (parseInt(h, 16) || 0).toString(16));
+  // Find longest zero run
+  let bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
+  for (let i = 0; i <= 8; i++) {
+    if (i < 8 && hextets[i] === '0') {
+      if (curStart < 0) curStart = i;
+      curLen++;
+    } else {
+      if (curLen > bestLen) { bestStart = curStart; bestLen = curLen; }
+      curStart = -1; curLen = 0;
+    }
+  }
+  if (bestLen < 2) return hextets.join(':');
+  const left = hextets.slice(0, bestStart).join(':');
+  const right = hextets.slice(bestStart + bestLen).join(':');
+  return `${left}::${right}`;
+}
+
+/** Normalize any CIDR to compressed network/prefix form for stable storage. */
+export function normalizeCIDR(cidr: string): string {
+  const { prefix, prefixLength } = parseCIDR(cidr);
+  const network = networkAddressFromCIDR(prefix, prefixLength);
+  return `${compressIPv6(network)}/${prefixLength}`;
+}
+
 export function generateIPv6(prefix: string, prefixLength: number): string {
   const hextets = prefix.split(':');
   const prefixBytes = Math.floor(prefixLength / 16);
@@ -147,7 +176,7 @@ export function detectIPv6Subnets(): string[] {
       // Compute the network / prefix address
       try {
         const network = networkAddressFromCIDR(ipStr, prefixLen);
-        const subnetCidr = `${network}/${prefixLen}`;
+        const subnetCidr = normalizeCIDR(`${network}/${prefixLen}`);
         subnets.add(subnetCidr);
       } catch {
         // silently skip malformed addresses
@@ -155,7 +184,32 @@ export function detectIPv6Subnets(): string[] {
     }
   }
 
-  return Array.from(subnets);
+  // Drop nested subnets: keep the broadest covering prefixes only.
+  // e.g. 2001:db8::/48 swallows 2001:db8:0:1::/64.
+  return collapseNestedSubnets(Array.from(subnets));
+}
+
+/** True if `outer` fully contains `inner` (strict: shorter prefix, same network bits). */
+export function cidrContains(outer: string, inner: string): boolean {
+  const o = parseCIDR(outer);
+  const i = parseCIDR(inner);
+  if (o.prefixLength >= i.prefixLength) return false;
+  const oNet = networkAddressFromCIDR(o.prefix, o.prefixLength);
+  const iAsOuter = networkAddressFromCIDR(i.prefix, o.prefixLength);
+  return oNet === iAsOuter;
+}
+
+/** Keep broadest CIDRs; drop any that sit inside another kept prefix. */
+export function collapseNestedSubnets(cidrs: string[]): string[] {
+  const sorted = [...cidrs].sort(
+    (a, b) => parseCIDR(a).prefixLength - parseCIDR(b).prefixLength
+  );
+  const kept: string[] = [];
+  for (const c of sorted) {
+    if (kept.some((k) => cidrContains(k, c))) continue;
+    kept.push(c);
+  }
+  return kept;
 }
 
 /**
