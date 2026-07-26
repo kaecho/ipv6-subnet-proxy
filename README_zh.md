@@ -13,6 +13,7 @@
 - [快速开始](#快速开始)
 - [配置说明](#配置说明)
 - [SOCKS5 代理使用](#socks5-代理使用)
+- [访问无 IPv6 解析的域名](#访问无-ipv6-解析的域名)
 - [REST API 参考](#rest-api-参考)
   - [健康检查](#健康检查)
   - [用户管理](#用户管理)
@@ -22,6 +23,7 @@
   - [流量统计](#流量统计)
   - [速率限制](#速率限制)
   - [审计日志](#审计日志)
+  - [解析诊断](#解析诊断)
 - [数据模型](#数据模型)
 - [速率限制机制](#速率限制机制)
 - [开发指南](#开发指南)
@@ -35,6 +37,7 @@
 - **SOCKS5 密码认证** — 完整实现 RFC 1928（SOCKS5）和 RFC 1929（用户名/密码）协议。支持 CONNECT 命令；BIND 和 UDP ASSOCIATE 请求将被拒绝。
 - **自动检测子网** — 启动时从宿主机网络接口自动检测 IPv6 子网，无需手动配置
 - **用户级 IPv6 分配** — 两种分配模式：`sticky`（同一用户+子网对复用固定 IPv6 地址）和 `random`（每次连接随机分配新地址，默认）
+- **CDN 边缘借用** — 未设置 AAAA 解析的站点，仍可通过其 CDN 的双栈边缘节点经 IPv6 访问；使用前先用证书验证。详见[访问无 IPv6 解析的域名](#访问无-ipv6-解析的域名)。
 - **自动绑定** — 创建用户时自动绑定所有活跃子网
 - **多子网管理** — 管理多个 `/64`（或任意前缀长度）子网，可为每个用户绑定任意子网组合
 - **REST 管理 API** — 完整的用户、子网和绑定关系 CRUD 操作；查询活跃会话、流量统计、审计日志；管理速率限制。
@@ -183,6 +186,28 @@ curl -X POST http://localhost:3000/api/v1/users \
 | `BCRYPT_ROUNDS` | `10` | 密码哈希的 bcrypt 轮次 |
 | `LOG_LEVEL` | `info` | 日志级别：`trace`、`debug`、`info`、`warn`、`error`、`fatal` |
 
+### IPv6 回退配置
+
+以下变量控制代理如何访问没有 AAAA 解析的域名。默认值已适用于绝大多数场景，通常无需调整。详见[访问无 IPv6 解析的域名](#访问无-ipv6-解析的域名)。
+
+| 变量 | 默认值 | 描述 |
+|---|---|---|
+| `CDN_FALLBACK_ENABLED` | `true` | 是否启用回退链。设为 `false` 时，无 AAAA 的域名直接失败 |
+| `CDN_FALLBACK_VERIFY` | `true` | 借用边缘节点前先用 TLS 握手验证。关闭后速度更快，但可能把证书错误暴露给客户端 |
+| `CDN_FALLBACK_PORTS` | `80,443` | 允许借用的端口。CDN 边缘节点不会监听任意端口 |
+| `CDN_FALLBACK_EDGES` | — | 手动指定可用边缘节点：`cloudfront=2600:9000::1,2600:9000::2;fastly=2a04:4e42::1`。纯地址列表适用于所有 CDN |
+| `CDN_FALLBACK_RESOLVERS` | _(系统)_ | 回退查询使用的 DNS 服务器，如 `1.1.1.1,8.8.8.8`。本地 DNS 会过滤 AAAA 记录时尤其有用 |
+| `CDN_FALLBACK_PROBE_ALL` | `true` | 无法识别 CDN 时，尝试所有已知边缘池 |
+| `CDN_FALLBACK_LEARN` | `true` | 记录已知 CDN 双栈主机上观察到的边缘地址，用真实流量保持边缘池新鲜 |
+| `CDN_FALLBACK_MAX_PROBES` | `6` | 单个目标的验证探测次数上限 |
+| `CDN_FALLBACK_PROBE_TIMEOUT_MS` | `5000` | 单次探测超时 |
+| `CDN_FALLBACK_DNS_TIMEOUT_MS` | `3000` | 单次 DNS 查询超时 |
+| `CDN_FALLBACK_TTL_MS` | `600000` | 成功路由的缓存时长（10 分钟） |
+| `CDN_FALLBACK_NEGATIVE_TTL_MS` | `60000` | 失败结果的缓存时长（1 分钟） |
+| `CDN_FALLBACK_EDGE_TTL_MS` | `1800000` | 边缘池的有效期（30 分钟） |
+| `CDN_FALLBACK_CACHE_MAX` | `4096` | 路由缓存条目上限 |
+| `NAT64_PREFIX` | — | 可选的 NAT64 `/96` 前缀（如 `64:ff9b::/96`），用于纯 IPv4 目标。需要可达的 NAT64 网关 |
+
 ---
 
 ## SOCKS5 代理使用
@@ -214,6 +239,59 @@ sysctl -w net.ipv6.ip_nonlocal_bind=1
 ```
 
 若要永久生效，请将 `net.ipv6.ip_nonlocal_bind=1` 添加到 `/etc/sysctl.conf` 或 `/etc/sysctl.d/99-ipv6.conf`。
+
+---
+
+## 访问无 IPv6 解析的域名
+
+纯 IPv6 出口通常只能访问设置了 AAAA 记录的域名。这看似排除了互联网的很大一部分，但实际情况远没有 DNS 显示的那么糟。
+
+这类站点大多位于 anycast CDN 之后。CDN 边缘节点本身是双栈的，它根据 TLS SNI 或 HTTP `Host` 头选择回源目标，而不是根据目标 IP——**因此无论站点是否设置 AAAA 解析，边缘节点都会通过 IPv6 提供服务**。在 DNS 中发布 IPv6 是客户侧的一个开关，而能否经 IPv6 访问则是边缘节点集群的固有属性。本代理正是利用了这两者之间的落差。
+
+由于 SOCKS5 在 TCP 层是透明转发，客户端自己的 SNI 和 `Host` 头会原样传递，只有目标地址被改变。
+
+### 回退链
+
+每次 CONNECT 都会按以下顺序解析目标，第一个成功的即被采用：
+
+| 层级 | 工作方式 |
+|---|---|
+| `native` | 域名自身有 AAAA 记录，直接使用，不做探测 |
+| `dualstack` | `dualstack.<cname 节点>` 有 AAAA 记录。Fastly、Akamai、AWS ELB 和 CloudFront 都发布这一变体——同一 CDN、同一映射，只是它的 IPv6 视图。借用保真度最高 |
+| `cdn-borrow` | 通过 CNAME 链或目标 IPv4 地址的 PTR 记录识别 CDN，然后借用同一 CDN 的其他边缘节点 |
+| `nat64` | 由 `NAT64_PREFIX` 合成地址。未配置时不启用 |
+
+### 验证机制
+
+借用绝不基于猜测。在正式使用某个边缘节点前，代理会先对它发起一次 TLS 握手，SNI 设为目标域名并完整校验证书。不服务该域名的节点会验证失败并被丢弃——这样一次错误的猜测只会变成一次干净的连接失败，而不会在用户浏览器里变成证书错误。
+
+在 80 端口上没有证书可校验，因此先在 443 端口用 TLS 验证该节点；只有在此之后，HTTP `Host` 探测才作为兜底证明。
+
+验证通过的路由缓存 10 分钟，失败结果缓存 1 分钟，因此探测开销按域名支付一次，而不是按连接支付。如果某条缓存路由的所有地址后续都连接失败，该条目会被丢弃，下次请求重新走一遍回退链。
+
+### 借用的边缘节点从哪来
+
+按优先级依次为：运维通过 `CDN_FALLBACK_EDGES` 手动指定的地址；**从实际流量中学习到的地址**（任何已知 CDN 的双栈主机本身就是该 CDN 边缘集群的一个样本）；以及内置的各 CDN 种子域名列表。学习机制使该功能不依赖于内置种子域名长期保持双栈。
+
+### 检测某个域名
+
+`scripts/check-ipv6.sh` 可在代理之外独立执行同样的检查：
+
+```bash
+./scripts/check-ipv6.sh support.apple.com build.nvidia.com
+```
+
+```
+HOST                  DNS_A6  NATIVE  DUALSTACK  BORROW  DETAIL
+support.apple.com     NO      -       -          YES     cname:prod-support.apple-support.akadns.net; borrow_ok=2600:1413:...
+www.akamai.com        YES     YES     -          YES     native=2600:1413:5000:35::173d:ca51 (2 AAAA)
+```
+
+对运行中的代理，`GET /api/v1/resolver/check?host=<域名>` 会返回它实际的判定结果，包括 CNAME 链、识别出的 CDN，以及所选地址是否已通过验证。
+
+### 局限
+
+借用只对确实位于受支持 CDN 之后的站点有效。若某域名只有单一的纯 IPv4 源站，则不存在任何 IPv6 路径——这种情况下需要配置 `NAT64_PREFIX` 并具备可达的 NAT64 网关，或者提供 IPv4 出口。代理会返回 `0x04`（主机不可达）而不是一直挂起。
 
 ---
 
@@ -346,6 +424,41 @@ sysctl -w net.ipv6.ip_nonlocal_bind=1
 - `ip.refreshed`
 - `rate_limits.updated`
 
+### 解析诊断
+
+IPv6 回退链的诊断接口，详见[访问无 IPv6 解析的域名](#访问无-ipv6-解析的域名)。
+
+| 方法 | 路径 | 描述 |
+|---|---|---|
+| `GET` | `/api/v1/resolver/check` | 诊断某域名如何经 IPv6 访问 |
+| `GET` | `/api/v1/resolver/cache` | 查看路由缓存、边缘池和已学习的边缘地址 |
+| `DELETE` | `/api/v1/resolver/cache` | 清空路由缓存 |
+
+**GET /api/v1/resolver/check**
+
+**查询参数：** `host`（必需）、`port`（默认 `443`）
+
+```json
+{
+  "host": "support.apple.com",
+  "port": 443,
+  "cnameChain": ["prod-support.apple-support.akadns.net"],
+  "aaaa": [],
+  "a": ["23.44.51.100"],
+  "provider": "akamai",
+  "route": {
+    "kind": "cdn-borrow",
+    "addresses": ["2600:1413:1::6011:b42a"],
+    "provider": "akamai",
+    "via": "akamai edge",
+    "verified": true
+  },
+  "error": null
+}
+```
+
+当不存在任何 IPv6 路径时，`route` 为 `null`，`error` 给出原因。
+
 ---
 
 ## 数据模型
@@ -437,6 +550,9 @@ npm run dev
 # 类型检查
 npm run typecheck
 
+# 运行测试（基于 node:test，无需网络）
+npm test
+
 # 构建
 npm run build
 ```
@@ -457,6 +573,8 @@ src/
 │   ├── sessions.ts             # 会话跟踪
 │   ├── traffic.ts              # 流量统计
 │   ├── rate-limiter.ts         # 速率限制
+│   ├── target-resolver.ts      # IPv6 回退链与边缘节点验证
+│   ├── cdn-providers.ts        # 已知 anycast CDN 特征与种子域名
 │   └── audit.ts                # 审计日志
 ├── socks5/
 │   └── server.ts               # SOCKS5 协议实现
@@ -472,10 +590,17 @@ src/
 │       ├── sessions.ts         # 会话管理端点
 │       ├── traffic.ts          # 流量统计端点
 │       ├── limits.ts           # 速率限制端点
-│       └── audit.ts            # 审计日志端点
+│       ├── audit.ts            # 审计日志端点
+│       └── resolver.ts         # IPv6 回退诊断端点
 └── utils/
     ├── ipv6.ts                 # IPv6 地址工具
     └── logger.ts               # Pino 日志器
+
+test/
+└── target-resolver.test.ts     # 回退链测试（node:test）
+
+scripts/
+└── check-ipv6.sh               # 独立的 IPv6 可达性检测脚本
 ```
 
 ---

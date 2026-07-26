@@ -11,6 +11,7 @@ import {
 } from '../core/sessions';
 import { recordBytes } from '../core/traffic';
 import { getRateLimitRules, TokenBucket, getOrCreateTokenBucket } from '../core/rate-limiter';
+import { resolveTargetRoute, invalidateRoute, TargetRoute } from '../core/target-resolver';
 import { getDb } from '../database/connection';
 
 const SOCKS_VERSION = 0x05;
@@ -95,18 +96,25 @@ export function createSocks5Server(port: number): net.Server {
 
         // Phase 3: Request
         clientSocket.once('data', (reqData) => {
-          handleRequest(reqData, clientSocket, userId, user.mode, bucket);
+          // Request handling is async (target resolution); an escaping
+          // rejection would otherwise take down the process.
+          handleRequest(reqData, clientSocket, userId, user.mode, bucket).catch((err) => {
+            log.error({ err: err.message, userId }, 'Unhandled error while handling SOCKS5 request');
+            if (!clientSocket.destroyed) {
+              clientSocket.destroy();
+            }
+          });
         });
       });
     });
 
-    function handleRequest(
+    async function handleRequest(
       data: Buffer,
       clientSocket: net.Socket,
       userId: string,
       mode: 'sticky' | 'random',
       bucket: TokenBucket | null
-    ): void {
+    ): Promise<void> {
       if (data.length < 5 || data[0] !== SOCKS_VERSION) {
         sendReply(clientSocket, REP_GENERAL_FAILURE);
         return;
@@ -152,6 +160,34 @@ export function createSocks5Server(port: number): net.Server {
 
       log.debug({ userId, targetHost, targetPort, mode }, 'SOCKS5 CONNECT');
 
+      // Resolve to a concrete IPv6 address first. Names without an AAAA
+      // record are often still reachable over IPv6 through their CDN, and
+      // names with no path at all should not churn an address allocation
+      // they will never use.
+      let route: TargetRoute;
+      try {
+        route = await resolveTargetRoute(targetHost, targetPort);
+      } catch (err: any) {
+        log.warn({ err: err.message, targetHost, targetPort }, 'No IPv6 route to target');
+        sendReply(clientSocket, REP_HOST_UNREACHABLE);
+        if (!clientSocket.destroyed) {
+          clientSocket.end();
+        }
+        return;
+      }
+
+      // The client may have given up while we were resolving.
+      if (clientSocket.destroyed) return;
+
+      if (route.addresses.length === 0) {
+        log.warn({ targetHost }, 'Resolver returned no addresses');
+        sendReply(clientSocket, REP_HOST_UNREACHABLE);
+        if (!clientSocket.destroyed) {
+          clientSocket.end();
+        }
+        return;
+      }
+
       // Get user's subnet bindings
       const db = getDb();
       const bindings = db.prepare(
@@ -184,40 +220,81 @@ export function createSocks5Server(port: number): net.Server {
       const session = createSession(userId, ipv6Addr, clientSocket);
       sessionId = session.id;
 
-      const targetSocket = net.createConnection({
-        host: targetHost,
-        port: targetPort,
-        localAddress: ipv6Addr,
-        family: 6,
-      });
+      const candidates = route.addresses;
+      let attempt = 0;
+      let established = false;
 
-      // Hard timeout: if the connect or first data doesn't happen within
-      // 30 seconds, give up (prevents hanging when target is unreachable).
-      targetSocket.setTimeout(30000, () => {
-        if (!targetSocket.destroyed) {
-          targetSocket.destroy(new Error('Connection timed out after 30s'));
-        }
-      });
+      const connectToCandidate = (): void => {
+        const address = candidates[attempt++];
 
-      setTargetSocket(session.id, targetSocket);
+        const targetSocket = net.createConnection({
+          host: address,
+          port: targetPort,
+          localAddress: ipv6Addr,
+          family: 6,
+        });
 
-      targetSocket.on('connect', () => {
-        const reply = buildReply(REP_SUCCESS, targetSocket);
-        clientSocket.write(reply);
-        relayData(clientSocket, targetSocket, userId, bucket, session.id);
-      });
+        // Hard timeout: if the connect or first data doesn't happen within
+        // 30 seconds, give up (prevents hanging when target is unreachable).
+        targetSocket.setTimeout(30000, () => {
+          if (!targetSocket.destroyed) {
+            targetSocket.destroy(new Error('Connection timed out after 30s'));
+          }
+        });
 
-      targetSocket.on('error', (err) => {
-        log.warn({ err: err.message, targetHost }, 'Failed to connect to target');
-        const replyCode = mapErrorToReplyCode(err);
-        sendReply(clientSocket, replyCode);
-        // Gracefully close: end() flushes the reply then sends FIN,
-        // unlike destroy() which drops pending writes.
-        if (!clientSocket.destroyed) {
-          clientSocket.end();
-        }
-        closeSession(session.id);
-      });
+        setTargetSocket(session.id, targetSocket);
+
+        targetSocket.on('connect', () => {
+          established = true;
+          log.debug(
+            { targetHost, address, kind: route.kind, provider: route.provider },
+            'Target connected'
+          );
+          const reply = buildReply(REP_SUCCESS, targetSocket);
+          clientSocket.write(reply);
+          relayData(clientSocket, targetSocket, userId, bucket, session.id);
+        });
+
+        targetSocket.on('error', (err) => {
+          // Once relaying starts the socket carries payload, not protocol —
+          // writing a SOCKS reply into it would corrupt the stream. relayData
+          // owns teardown from here.
+          if (established) {
+            log.debug(
+              { err: err.message, targetHost, address },
+              'Target connection error during relay'
+            );
+            return;
+          }
+
+          // A stale AAAA or a dead anycast edge can fail even though the name
+          // resolved; try the next candidate before giving up on the client.
+          if (attempt < candidates.length && !clientSocket.destroyed) {
+            log.debug(
+              { err: err.message, targetHost, address },
+              'Target address unreachable, trying next candidate'
+            );
+            connectToCandidate();
+            return;
+          }
+
+          log.warn({ err: err.message, targetHost, address }, 'Failed to connect to target');
+          // Every candidate for this route is dead — re-resolve next time
+          // rather than serving the same broken address until the TTL runs out.
+          invalidateRoute(targetHost, targetPort);
+
+          const replyCode = mapErrorToReplyCode(err);
+          sendReply(clientSocket, replyCode);
+          // Gracefully close: end() flushes the reply then sends FIN,
+          // unlike destroy() which drops pending writes.
+          if (!clientSocket.destroyed) {
+            clientSocket.end();
+          }
+          closeSession(session.id);
+        });
+      };
+
+      connectToCandidate();
     }
   });
 

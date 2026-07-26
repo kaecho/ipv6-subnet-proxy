@@ -10,6 +10,7 @@ import { registerSessionRoutes } from './routes/sessions';
 import { registerTrafficRoutes } from './routes/traffic';
 import { registerLimitRoutes } from './routes/limits';
 import { registerAuditRoutes } from './routes/audit';
+import { registerResolverRoutes } from './routes/resolver';
 
 export async function createApiServer(): Promise<FastifyInstance> {
   const config = loadConfig();
@@ -45,6 +46,7 @@ export async function createApiServer(): Promise<FastifyInstance> {
     registerTrafficRoutes(v1);
     registerLimitRoutes(v1);
     registerAuditRoutes(v1);
+    registerResolverRoutes(v1);
   }, { prefix: '/api/v1' });
 
   return app;

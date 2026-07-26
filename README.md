@@ -13,6 +13,7 @@ A Node.js TypeScript SOCKS5 proxy that distributes outbound connections across d
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [SOCKS5 Proxy Usage](#socks5-proxy-usage)
+- [Reaching IPv4-Only Names](#reaching-ipv4-only-names)
 - [REST API Reference](#rest-api-reference)
   - [Health](#health)
   - [Users](#users)
@@ -22,6 +23,7 @@ A Node.js TypeScript SOCKS5 proxy that distributes outbound connections across d
   - [Traffic](#traffic)
   - [Rate Limits](#rate-limits)
   - [Audit Logs](#audit-logs)
+  - [Resolver](#resolver)
 - [Data Model](#data-model)
 - [Rate Limiting](#rate-limiting)
 - [Development](#development)
@@ -35,6 +37,7 @@ A Node.js TypeScript SOCKS5 proxy that distributes outbound connections across d
 - **SOCKS5 with Password Auth** — Full RFC 1928 (SOCKS5) and RFC 1929 (Username/Password) support. Only CONNECT command; BIND and UDP ASSOCIATE are rejected.
 - **Auto-Detect Subnets** — IPv6 subnets are automatically detected from host network interfaces on startup; no manual configuration needed
 - **Per-User IPv6 Allocation** — Two modes: `sticky` (same IPv6 address is reused for each user+subnet pair) and `random` (new address per connection, default)
+- **CDN Edge Borrowing** — Sites that publish no AAAA record are still reached over IPv6 through their CDN's dual-stack edge fleet, verified by certificate before use. See [Reaching IPv4-Only Names](#reaching-ipv4-only-names).
 - **Auto-Binding** — Users are automatically bound to all active subnets on creation
 - **Multi-Subnet Management** — Manage multiple `/64` (or any prefix length) subnets, bind any subset to each user
 - **REST Management API** — Full CRUD for users, subnets, and bindings; query active sessions, traffic stats, audit logs; manage rate limits.
@@ -198,6 +201,28 @@ All configuration is via environment variables:
 | `BCRYPT_ROUNDS` | `10` | bcrypt hash rounds for password hashing |
 | `LOG_LEVEL` | `info` | Logging level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
 
+### IPv6 Fallback
+
+These control how the proxy reaches names that publish no AAAA record. Defaults are sensible; most deployments need none of them. See [Reaching IPv4-Only Names](#reaching-ipv4-only-names).
+
+| Variable | Default | Description |
+|---|---|---|
+| `CDN_FALLBACK_ENABLED` | `true` | Enable the fallback ladder. When `false`, names without AAAA simply fail |
+| `CDN_FALLBACK_VERIFY` | `true` | Verify a borrowed edge with a TLS handshake before using it. Turning this off is faster but can surface certificate errors to clients |
+| `CDN_FALLBACK_PORTS` | `80,443` | Ports on which borrowing is allowed. CDN edges do not listen on arbitrary ports |
+| `CDN_FALLBACK_EDGES` | — | Pin known-good edges: `cloudfront=2600:9000::1,2600:9000::2;fastly=2a04:4e42::1`. A bare comma-separated list is used for any provider |
+| `CDN_FALLBACK_RESOLVERS` | _(system)_ | DNS servers for fallback lookups, e.g. `1.1.1.1,8.8.8.8`. Useful when the local resolver strips AAAA records |
+| `CDN_FALLBACK_PROBE_ALL` | `true` | When the CDN cannot be identified, probe edges from every known pool |
+| `CDN_FALLBACK_LEARN` | `true` | Remember edge addresses observed on dual-stack hosts of a known CDN, keeping the borrow pool fresh from real traffic |
+| `CDN_FALLBACK_MAX_PROBES` | `6` | Upper bound on verification probes per target |
+| `CDN_FALLBACK_PROBE_TIMEOUT_MS` | `5000` | Per-probe timeout |
+| `CDN_FALLBACK_DNS_TIMEOUT_MS` | `3000` | Per-query DNS timeout |
+| `CDN_FALLBACK_TTL_MS` | `600000` | How long a successful route is cached (10 min) |
+| `CDN_FALLBACK_NEGATIVE_TTL_MS` | `60000` | How long a failure is cached (1 min) |
+| `CDN_FALLBACK_EDGE_TTL_MS` | `1800000` | How long a harvested edge pool stays valid (30 min) |
+| `CDN_FALLBACK_CACHE_MAX` | `4096` | Maximum cached routes |
+| `NAT64_PREFIX` | — | Opt-in NAT64 `/96` prefix (e.g. `64:ff9b::/96`) for IPv4-only targets. Requires a reachable NAT64 gateway |
+
 ---
 
 ## SOCKS5 Proxy Usage
@@ -230,6 +255,59 @@ sysctl -w net.ipv6.ip_nonlocal_bind=1
 ```
 
 To make this permanent, add `net.ipv6.ip_nonlocal_bind=1` to `/etc/sysctl.conf` or `/etc/sysctl.d/99-ipv6.conf`.
+
+---
+
+## Reaching IPv4-Only Names
+
+An IPv6-only egress can normally only reach names that publish an AAAA record. That rules out a large part of the web — but far less of it than DNS suggests.
+
+Most of those sites sit behind an anycast CDN. A CDN edge is dual-stack and picks the origin from the TLS SNI or the HTTP `Host` header, not from the destination IP, so **it will serve a site over IPv6 whether or not that site publishes an AAAA record**. Publishing IPv6 in DNS is a per-customer toggle; being reachable over IPv6 is a property of the edge fleet. The proxy exploits that gap.
+
+Because a SOCKS5 relay is transparent at the TCP layer, the client's own SNI and `Host` header pass through untouched. Only the destination address changes.
+
+### The ladder
+
+On every CONNECT the target is resolved through these rungs, and the first that works wins:
+
+| Rung | How it works |
+|---|---|
+| `native` | The name publishes its own AAAA records. Used directly, no probing. |
+| `dualstack` | `dualstack.<cname-hop>` has AAAA. Fastly, Akamai, AWS ELB and CloudFront all publish this variant — same CDN, same mapping, just its IPv6 view. Highest fidelity borrow. |
+| `cdn-borrow` | The CDN is identified from the CNAME chain, or from the PTR record of the target's IPv4 address, and a borrowed edge of that same CDN is used. |
+| `nat64` | An address synthesized from `NAT64_PREFIX`. Off unless configured. |
+
+### Verification
+
+A borrow is never used on trust. Before committing to an edge, the proxy completes a TLS handshake against it with SNI set to the target name and full certificate validation. An edge that does not serve the name fails the check and is discarded, so a wrong guess turns into a clean connection failure rather than a certificate error in the user's browser.
+
+On port 80, where there is no certificate to check, the edge is first verified over TLS on 443; only then does an HTTP `Host` probe act as the fallback proof.
+
+Verified routes are cached for 10 minutes and failures for 1 minute, so the probe cost is paid once per host, not once per connection. If every address for a cached route later fails to connect, the entry is dropped and the ladder runs again on the next attempt.
+
+### Where the borrowed edges come from
+
+In priority order: addresses pinned by the operator via `CDN_FALLBACK_EDGES`, then addresses **learned from live traffic** (any dual-stack host of a known CDN is itself a sample of that CDN's edge fleet), then a built-in list of seed hostnames per provider. The learned pool means the feature does not depend on the built-in seeds staying dual-stack forever.
+
+### Checking a host
+
+`scripts/check-ipv6.sh` runs the same checks offline:
+
+```bash
+./scripts/check-ipv6.sh support.apple.com build.nvidia.com
+```
+
+```
+HOST                  DNS_A6  NATIVE  DUALSTACK  BORROW  DETAIL
+support.apple.com     NO      -       -          YES     cname:prod-support.apple-support.akadns.net; borrow_ok=2600:1413:...
+www.akamai.com        YES     YES     -          YES     native=2600:1413:5000:35::173d:ca51 (2 AAAA)
+```
+
+Against a running proxy, `GET /api/v1/resolver/check?host=<host>` reports what it actually decided, including the CNAME chain, the detected CDN, and whether the chosen address was verified.
+
+### Limits
+
+Borrowing only helps for sites that are genuinely behind a supported CDN. A name served from a single IPv4-only origin has no IPv6 path at all — for those, either configure `NAT64_PREFIX` with a reachable NAT64 gateway, or provide an IPv4 egress. The proxy reports `0x04` (host unreachable) rather than hanging.
 
 ---
 
@@ -362,6 +440,41 @@ Bind users to subnets. A user must be bound to at least one subnet to use the SO
 - `ip.refreshed`
 - `rate_limits.updated`
 
+### Resolver
+
+Diagnostics for the IPv6 fallback ladder — see [Reaching IPv4-Only Names](#reaching-ipv4-only-names).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/resolver/check` | Diagnose how a hostname is reached over IPv6 |
+| `GET` | `/api/v1/resolver/cache` | Inspect cached routes, edge pools and learned edges |
+| `DELETE` | `/api/v1/resolver/cache` | Clear the route cache |
+
+**GET /api/v1/resolver/check**
+
+**Query parameters:** `host` (required), `port` (default `443`)
+
+```json
+{
+  "host": "support.apple.com",
+  "port": 443,
+  "cnameChain": ["prod-support.apple-support.akadns.net"],
+  "aaaa": [],
+  "a": ["23.44.51.100"],
+  "provider": "akamai",
+  "route": {
+    "kind": "cdn-borrow",
+    "addresses": ["2600:1413:1::6011:b42a"],
+    "provider": "akamai",
+    "via": "akamai edge",
+    "verified": true
+  },
+  "error": null
+}
+```
+
+`route` is `null` and `error` is set when no IPv6 path exists.
+
 ---
 
 ## Data Model
@@ -453,6 +566,9 @@ npm run dev
 # Type checking
 npm run typecheck
 
+# Tests (node:test, no network access required)
+npm test
+
 # Build
 npm run build
 ```
@@ -473,6 +589,8 @@ src/
 │   ├── sessions.ts             # Session tracking
 │   ├── traffic.ts              # Traffic accounting
 │   ├── rate-limiter.ts         # Rate limiting
+│   ├── target-resolver.ts      # IPv6 fallback ladder + edge verification
+│   ├── cdn-providers.ts        # Known anycast CDN fingerprints and seeds
 │   └── audit.ts                # Audit logging
 ├── socks5/
 │   └── server.ts               # SOCKS5 protocol implementation
@@ -488,10 +606,17 @@ src/
 │       ├── sessions.ts         # Session management endpoints
 │       ├── traffic.ts          # Traffic stats endpoints
 │       ├── limits.ts           # Rate limit endpoints
-│       └── audit.ts            # Audit log endpoints
+│       ├── audit.ts            # Audit log endpoints
+│       └── resolver.ts         # IPv6 fallback diagnostics
 └── utils/
     ├── ipv6.ts                 # IPv6 address utilities
     └── logger.ts               # Pino logger
+
+test/
+└── target-resolver.test.ts     # Fallback ladder tests (node:test)
+
+scripts/
+└── check-ipv6.sh               # Offline IPv6 reachability check
 ```
 
 ---

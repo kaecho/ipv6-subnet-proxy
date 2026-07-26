@@ -10,6 +10,15 @@ services:
       - API_KEY=changeme
       - DEFAULT_SUBNET=
       - LOG_LEVEL=info
+      # Names without an AAAA record are reached through their CDN's
+      # dual-stack edge fleet. On by default; see the README for the full set.
+      # - CDN_FALLBACK_ENABLED=true
+      # Use public resolvers when the local one strips AAAA records.
+      # - CDN_FALLBACK_RESOLVERS=1.1.1.1,8.8.8.8
+      # Pin known-good edges instead of discovering them.
+      # - CDN_FALLBACK_EDGES=cloudfront=2600:9000:2015:1600::1
+      # Reach IPv4-only origins through a NAT64 gateway (opt-in).
+      # - NAT64_PREFIX=64:ff9b::/96
     volumes:
       - ./data:/data
     cap_add:
