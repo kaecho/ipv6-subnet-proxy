@@ -76,6 +76,48 @@ export interface TunnelConfig {
   requestTimeoutMs: number;
 }
 
+/**
+ * Cloudflare WARP — free IPv6 over WireGuard, no account required.
+ *
+ * Each registration yields exactly one address, so `accounts` is what decides
+ * how many egress IPs the proxy has to rotate between. See `core/warp.ts`.
+ */
+export interface WarpConfig {
+  enabled: boolean;
+  /** Devices to register. Each one is a separate WireGuard link and egress IP. */
+  accounts: number;
+  /** Interface names are this plus the slot number: `warp0`, `warp1`, ... */
+  devicePrefix: string;
+  mtu: number;
+  /** First policy-routing table; slot N uses this plus N. */
+  routeTable: number;
+  /**
+   * First rule priority; slot N uses this plus N. Must stay below the main
+   * table's rule at 32766, or the host's own default route wins and WARP-sourced
+   * traffic leaves through the wrong interface.
+   */
+  rulePriority: number;
+  keepalive: number;
+  /** Cloudflare's WireGuard endpoint, used when the API does not name one. */
+  endpoint: string;
+  apiUrl: string;
+  clientVersion: string;
+  userAgent: string;
+  /** Optional WARP+ licence key. The free tier already provides the address. */
+  license: string | null;
+  /** Register each WARP address as a one-address allocation subnet. */
+  registerSubnets: boolean;
+  teardownOnExit: boolean;
+  /** Discard stored registrations and register new devices — new egress IPs. */
+  reset: boolean;
+  verify: boolean;
+  verifyHost: string;
+  verifyPort: number;
+  requestTimeoutMs: number;
+  /** Pause between registrations; Cloudflare rate-limits bursts. */
+  registerDelayMs: number;
+}
+
 export interface AppConfig {
   socks5Port: number;
   apiPort: number;
@@ -88,6 +130,7 @@ export interface AppConfig {
   logLevel: string;
   cdnFallback: CdnFallbackConfig;
   tunnel: TunnelConfig;
+  warp: WarpConfig;
 }
 
 function envInt(key: string, def: number): number {
@@ -260,6 +303,66 @@ function loadTunnelConfig(): TunnelConfig {
   };
 }
 
+function loadWarpConfig(): WarpConfig {
+  const accounts = envInt('WARP_ACCOUNTS', 1);
+  if (accounts < 1 || accounts > 64) {
+    throw new Error(`WARP_ACCOUNTS must be 1-64, got: ${accounts}`);
+  }
+
+  const mtu = envInt('WARP_MTU', 1280);
+  if (mtu < 1280 || mtu > 1500) {
+    throw new Error(`WARP_MTU must be 1280-1500 (IPv6 minimum MTU is 1280), got: ${mtu}`);
+  }
+
+  const routeTable = envInt('WARP_ROUTE_TABLE', 51820);
+  // Slot N uses routeTable + N, so the whole span has to stay legal and clear
+  // of the reserved default/main/local tables.
+  const highest = routeTable + accounts - 1;
+  if (routeTable < 1 || highest > 0xffffffff) {
+    throw new Error(`WARP_ROUTE_TABLE + WARP_ACCOUNTS must stay within 1-4294967295, got: ${routeTable}..${highest}`);
+  }
+  if (routeTable <= 255 && highest >= 253) {
+    throw new Error(`WARP_ROUTE_TABLE range ${routeTable}..${highest} overlaps the reserved tables 253-255`);
+  }
+
+  // Rules are consulted in ascending priority, and the main table sits at
+  // 32766. A WARP rule after it would never be reached on a host that has a
+  // default route of its own — its traffic would leave through the native
+  // interface with a Cloudflare source address, and be dropped.
+  const rulePriority = envInt('WARP_RULE_PRIORITY', 1520);
+  const lowestPriority = rulePriority + accounts - 1;
+  if (rulePriority < 1 || lowestPriority >= 32766) {
+    throw new Error(
+      `WARP_RULE_PRIORITY + WARP_ACCOUNTS must stay within 1-32765 so the rules are ` +
+        `consulted before the main table, got: ${rulePriority}..${lowestPriority}`
+    );
+  }
+
+  return {
+    enabled: envBool('WARP_ENABLED', false),
+    accounts,
+    devicePrefix: process.env.WARP_DEVICE_PREFIX?.trim() || 'warp',
+    mtu,
+    routeTable,
+    rulePriority,
+    keepalive: envInt('WARP_KEEPALIVE', 25),
+    endpoint: process.env.WARP_ENDPOINT?.trim() || 'engage.cloudflareclient.com:2408',
+    apiUrl: process.env.WARP_API_URL?.trim() || 'https://api.cloudflareclient.com/v0a2158/reg',
+    clientVersion: process.env.WARP_CLIENT_VERSION?.trim() || 'a-6.10-2158',
+    userAgent: process.env.WARP_USER_AGENT?.trim() || 'okhttp/3.12.1',
+    license: envStr('WARP_LICENSE'),
+    registerSubnets: envBool('WARP_REGISTER_SUBNETS', true),
+    teardownOnExit: envBool('WARP_TEARDOWN_ON_EXIT', true),
+    reset: envBool('WARP_RESET', false),
+    verify: envBool('WARP_VERIFY', true),
+    // Cloudflare's own resolver: reachable from every WARP link, answers on TCP/53.
+    verifyHost: process.env.WARP_VERIFY_HOST?.trim() || '2606:4700:4700::1111',
+    verifyPort: envInt('WARP_VERIFY_PORT', 53),
+    requestTimeoutMs: envInt('WARP_REQUEST_TIMEOUT_MS', 15_000),
+    registerDelayMs: envInt('WARP_REGISTER_DELAY_MS', 1_500),
+  };
+}
+
 export function loadConfig(): AppConfig {
   const apiKey = process.env.API_KEY;
   if (!apiKey) {
@@ -278,5 +381,6 @@ export function loadConfig(): AppConfig {
     logLevel: process.env.LOG_LEVEL || 'info',
     cdnFallback: loadCdnFallbackConfig(),
     tunnel: loadTunnelConfig(),
+    warp: loadWarpConfig(),
   };
 }

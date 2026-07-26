@@ -69,7 +69,36 @@ export function runMigrations(db: Database.Database): void {
       max_bandwidth   INTEGER,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
+
+    -- Cloudflare WARP registrations. Kept so a restart reuses the same egress
+    -- addresses instead of handing every user a new IP and burning through
+    -- Cloudflare's registration quota. One row per WireGuard link.
+    CREATE TABLE IF NOT EXISTS warp_accounts (
+      id              TEXT PRIMARY KEY,
+      slot            INTEGER NOT NULL UNIQUE,
+      device_id       TEXT,
+      token           TEXT,
+      account_id      TEXT,
+      account_type    TEXT,
+      license         TEXT,
+      private_key     TEXT NOT NULL,
+      public_key      TEXT NOT NULL,
+      peer_public_key TEXT NOT NULL,
+      client_id       TEXT,
+      endpoint_host   TEXT,
+      address_v4      TEXT,
+      address_v6      TEXT NOT NULL,
+      created_at      TEXT NOT NULL
+    );
   `);
+
+  // Which mechanism put a subnet in the table, so the ones the proxy manages
+  // itself can be reconciled without touching operator-added subnets.
+  const subnetColumns = (db.prepare('PRAGMA table_info(subnets)').all() as { name: string }[])
+    .map((c) => c.name);
+  if (!subnetColumns.includes('source')) {
+    db.exec('ALTER TABLE subnets ADD COLUMN source TEXT');
+  }
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
@@ -79,6 +108,7 @@ export function runMigrations(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_sticky_bindings_user ON sticky_bindings(user_id);
     CREATE INDEX IF NOT EXISTS idx_user_subnet_bindings_user ON user_subnet_bindings(user_id);
     CREATE INDEX IF NOT EXISTS idx_user_subnet_bindings_subnet ON user_subnet_bindings(subnet_id);
+    CREATE INDEX IF NOT EXISTS idx_subnets_source ON subnets(source);
   `);
 
   log.info('Database migrations completed successfully');

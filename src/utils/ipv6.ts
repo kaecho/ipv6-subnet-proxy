@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import net from 'net';
 import os from 'os';
 import { execFileSync } from 'child_process';
 
@@ -77,6 +78,11 @@ export function normalizeCIDR(cidr: string): string {
 }
 
 export function generateIPv6(prefix: string, prefixLength: number): string {
+  // A /128 is one address, not a pool: there are no host bits to randomize, and
+  // the empty suffix would match the all-zeros retry below forever. WARP hands
+  // out exactly one /128 per account, so this is a normal case here.
+  if (prefixLength >= 128) return parseCIDR(`${prefix}/128`).prefix;
+
   const hextets = prefix.split(':');
   const prefixBytes = Math.floor(prefixLength / 16);
 
@@ -99,8 +105,9 @@ export function generateIPv6(prefix: string, prefixLength: number): string {
   // Avoid all-zeros and all-ones interface ID
   const suffixStart = Math.max(0, prefixBytes);
   const suffix = result.slice(suffixStart).join(':');
-  if (suffix === '0000:0000:0000:0000'.slice(0, suffix.length) ||
-      suffix === 'ffff:ffff:ffff:ffff'.slice(0, suffix.length)) {
+  if (suffix.length > 0 &&
+      (suffix === '0000:0000:0000:0000'.slice(0, suffix.length) ||
+       suffix === 'ffff:ffff:ffff:ffff'.slice(0, suffix.length))) {
     return generateIPv6(prefix, prefixLength);
   }
 
@@ -313,8 +320,36 @@ function networkAddressFromCIDR(address: string, prefixLen: number): string {
 
 let _outboundInterface: string | null = null;
 const _registeredAddrs = new Map<string, { refs: number; iface: string }>();
-/** Prefixes that live on a specific device — currently the 6in4 tunnel's. */
+/** Prefixes that live on a specific device — the 6in4 tunnel's, and each WARP link's. */
 const _prefixInterfaces: { cidr: string; iface: string }[] = [];
+/**
+ * Addresses that belong to their device for as long as it exists, rather than
+ * being borrowed per session. A WARP interface's single /128 *is* the
+ * interface's address: session refcounting must never add or remove it, or the
+ * last session to end would take the whole link's egress address with it.
+ */
+const _pinnedAddrs = new Set<string>();
+
+/** Expanded 8-hextet form, so a pinned address matches however it was written. */
+function canonicalAddress(addr: string): string {
+  try {
+    return parseCIDR(`${addr}/128`).prefix;
+  } catch {
+    return addr;
+  }
+}
+
+export function pinIPv6Address(addr: string): void {
+  _pinnedAddrs.add(canonicalAddress(addr));
+}
+
+export function isPinnedIPv6Address(addr: string): boolean {
+  return _pinnedAddrs.has(canonicalAddress(addr));
+}
+
+export function clearPinnedIPv6Addresses(): void {
+  _pinnedAddrs.clear();
+}
 
 /**
  * Pin a prefix to a device, so addresses from it are added there instead of on
@@ -407,6 +442,10 @@ export function getOutboundInterface(): string {
  * solicitations, so return packets reach the container.
  */
 export function registerIPv6Address(addr: string): void {
+  // A pinned address is already configured on its device and outlives every
+  // session that sources from it.
+  if (isPinnedIPv6Address(addr)) return;
+
   const entry = _registeredAddrs.get(addr);
   if (entry) {
     entry.refs++;
@@ -465,6 +504,7 @@ export function unregisterAllIPv6Addresses(): void {
 }
 
 function removeAddressFromInterface(addr: string, iface: string): void {
+  if (isPinnedIPv6Address(addr)) return;
   try {
     execFileSync('ip', ['-6', 'addr', 'del', `${addr}/128`, 'dev', iface], {
       timeout: 3000,
@@ -472,4 +512,47 @@ function removeAddressFromInterface(addr: string, iface: string): void {
   } catch {
     // best-effort — may not be on the interface in this process
   }
+}
+
+// --- egress probing ---
+
+export interface SourceProbe {
+  source: string;
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * Open a TCP connection bound to `source`, proving that packets sourced from
+ * that address actually reach the internet. This is what separates "the device
+ * and routes exist" from "the tunnel carries traffic".
+ */
+export function probeFromSource(
+  source: string,
+  host: string,
+  port: number,
+  timeoutMs: number
+): Promise<SourceProbe> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let socket: net.Socket | null = null;
+
+    const finish = (ok: boolean, detail: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket?.destroy();
+      resolve({ source, ok, detail });
+    };
+
+    const timer = setTimeout(() => finish(false, `no answer within ${timeoutMs}ms`), timeoutMs);
+
+    try {
+      socket = net.createConnection({ host, port, localAddress: source, family: 6 });
+      socket.on('connect', () => finish(true, `reached [${host}]:${port}`));
+      socket.on('error', (err) => finish(false, err.message));
+    } catch (err: any) {
+      finish(false, err.message);
+    }
+  });
 }

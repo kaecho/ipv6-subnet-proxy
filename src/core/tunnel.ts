@@ -19,13 +19,13 @@
  * The `ip` invocations are built by pure functions so the exact sequence can be
  * asserted in tests without root or a network.
  */
-import net from 'net';
 import os from 'os';
 import fs from 'fs';
 import { execFileSync } from 'child_process';
 import { TunnelConfig } from '../config';
 import { getLogger } from '../utils/logger';
 import {
+  SourceProbe,
   parseCIDR,
   normalizeCIDR,
   generateIPv6,
@@ -35,6 +35,7 @@ import {
   registerIPv6Address,
   forceUnregisterIPv6Address,
   resetOutboundInterface,
+  probeFromSource,
 } from '../utils/ipv6';
 import {
   TunnelInfo,
@@ -72,11 +73,7 @@ export interface TunnelPlan {
   setup: IpCommand[];
 }
 
-export interface TunnelProbe {
-  source: string;
-  ok: boolean;
-  detail: string;
-}
+export type TunnelProbe = SourceProbe;
 
 export interface TunnelState {
   enabled: boolean;
@@ -453,8 +450,9 @@ export function applyTunnel(spec: TunnelSpec, cfg: TunnelConfig): string[] {
   warnings.push(...runPlanPhase(plan.setup, 'setup'));
 
   // Addresses from these prefixes belong on the tunnel, not on whatever
-  // interface happens to hold the host's default route.
-  clearPrefixInterfaces();
+  // interface happens to hold the host's default route. Scoped to this device
+  // so a reconnect does not disown prefixes that belong to a WARP link.
+  clearPrefixInterfaces(spec.device);
   for (const prefix of spec.routedPrefixes) {
     registerInterfaceForPrefix(prefix, spec.device);
   }
@@ -479,31 +477,6 @@ export function applyTunnel(spec: TunnelSpec, cfg: TunnelConfig): string[] {
 
 // --- verification ------------------------------------------------------------
 
-function probeFrom(source: string, host: string, port: number, timeoutMs: number): Promise<TunnelProbe> {
-  return new Promise((resolve) => {
-    let settled = false;
-    let socket: net.Socket | null = null;
-
-    const finish = (ok: boolean, detail: string): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      socket?.destroy();
-      resolve({ source, ok, detail });
-    };
-
-    const timer = setTimeout(() => finish(false, `no answer within ${timeoutMs}ms`), timeoutMs);
-
-    try {
-      socket = net.createConnection({ host, port, localAddress: source, family: 6 });
-      socket.on('connect', () => finish(true, `reached [${host}]:${port}`));
-      socket.on('error', (err) => finish(false, err.message));
-    } catch (err: any) {
-      finish(false, err.message);
-    }
-  });
-}
-
 /**
  * Prove the tunnel carries traffic: once from the tunnel address itself, and
  * once from a random address in the routed prefix — the path a session takes.
@@ -512,7 +485,7 @@ export async function verifyTunnel(spec: TunnelSpec, cfg: TunnelConfig): Promise
   const probes: TunnelProbe[] = [];
   const timeoutMs = 5000;
 
-  probes.push(await probeFrom(spec.clientIpv6, cfg.verifyHost, cfg.verifyPort, timeoutMs));
+  probes.push(await probeFromSource(spec.clientIpv6, cfg.verifyHost, cfg.verifyPort, timeoutMs));
 
   const prefix = spec.routedPrefixes[0];
   if (prefix) {
@@ -520,7 +493,7 @@ export async function verifyTunnel(spec: TunnelSpec, cfg: TunnelConfig): Promise
     const addr = generateIPv6(parsed.prefix, parsed.prefixLength);
     registerIPv6Address(addr);
     try {
-      probes.push(await probeFrom(addr, cfg.verifyHost, cfg.verifyPort, timeoutMs));
+      probes.push(await probeFromSource(addr, cfg.verifyHost, cfg.verifyPort, timeoutMs));
     } finally {
       forceUnregisterIPv6Address(addr);
     }
@@ -678,7 +651,7 @@ export function stopTunnel(): void {
   }
 
   runPlanPhase(planTunnelTeardown(_state.spec, _cfg.routeTable), 'teardown');
-  clearPrefixInterfaces();
+  clearPrefixInterfaces(_state.device);
   _state.up = false;
   log.info({ device: _state.device }, '6in4 tunnel torn down');
 }

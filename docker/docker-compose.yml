@@ -29,6 +29,20 @@ services:
       # Behind NAT, point the tunnel at the LAN address and forward protocol 41:
       # - HE_TUNNEL_LOCAL_IPV4=192.168.1.20
       # ---------------------------------------------------------------------
+      # --- IPv6 via Cloudflare WARP ----------------------------------------
+      # The other way to get free IPv6 on a host that has none, and the one
+      # that needs no signup at all: the proxy registers WARP devices itself.
+      # Each device is one WireGuard link and one egress IPv6 address, so raise
+      # WARP_ACCOUNTS to get a pool to rotate across. Needs the wireguard
+      # kernel module on the HOST: modprobe wireguard.
+      # - WARP_ENABLED=true
+      # - WARP_ACCOUNTS=8
+      # A WARP+ licence key raises the quota; the free tier still gets IPv6.
+      # - WARP_LICENSE=xxxxxxxx-xxxx-xxxx-xxxxxxxxxxxx
+      # Registrations are stored in /data and reused, so restarts keep the same
+      # addresses. Set this once to deliberately rotate to new ones.
+      # - WARP_RESET=true
+      # ---------------------------------------------------------------------
       # Names without an AAAA record are reached through their CDN's
       # dual-stack edge fleet. On by default; see the README for the full set.
       # - CDN_FALLBACK_ENABLED=true
@@ -40,8 +54,8 @@ services:
       # - NAT64_PREFIX=64:ff9b::/96
     volumes:
       - ./data:/data
-      # Only needed if the host has not loaded the sit module itself; lets the
-      # container run `modprobe sit` (with cap_add SYS_MODULE below).
+      # Only needed if the host has not loaded the sit / wireguard modules
+      # itself; lets the container modprobe them (with cap_add SYS_MODULE below).
       # - /lib/modules:/lib/modules:ro
     cap_add:
       - NET_ADMIN

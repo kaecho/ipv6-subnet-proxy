@@ -17,4 +17,20 @@ if [ -n "${HE_TUNNEL_SERVER_IPV4:-}${HE_TUNNEL_ID:-}" ] && [ ! -e /sys/class/net
   fi
 fi
 
+# WARP is WireGuard, which is a kernel module too. There is no always-present
+# device to test for the way sit0 exists, so ask the kernel whether it knows the
+# link type at all.
+case "${WARP_ENABLED:-}" in
+  1|true|TRUE|True|yes|YES|on|ON)
+    modprobe wireguard 2>/dev/null || true
+    if ! ip link add dev warpprobe type wireguard 2>/dev/null; then
+      echo "warning: the wireguard kernel module is not available — WARP links will fail to come up."
+      echo "         Run 'modprobe wireguard' on the HOST (persist with /etc/modules-load.d/wireguard.conf),"
+      echo "         and make sure the container has --cap-add=NET_ADMIN."
+    else
+      ip link del warpprobe 2>/dev/null || true
+    fi
+    ;;
+esac
+
 exec node /app/dist/index.js

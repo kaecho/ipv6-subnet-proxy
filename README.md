@@ -11,7 +11,9 @@ A Node.js TypeScript SOCKS5 proxy that distributes outbound connections across d
 - [Features](#features)
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
-- [No IPv6 on the Host? Use a Tunnel Broker](#no-ipv6-on-the-host-use-a-tunnel-broker)
+- [No IPv6 on the Host?](#no-ipv6-on-the-host)
+  - [Option 1: Cloudflare WARP](#option-1-cloudflare-warp-no-signup)
+  - [Option 2: A Tunnel Broker](#option-2-a-tunnel-broker-a-whole-routed-prefix)
 - [Configuration](#configuration)
 - [SOCKS5 Proxy Usage](#socks5-proxy-usage)
 - [Reaching IPv4-Only Names](#reaching-ipv4-only-names)
@@ -26,6 +28,7 @@ A Node.js TypeScript SOCKS5 proxy that distributes outbound connections across d
   - [Audit Logs](#audit-logs)
   - [Resolver](#resolver)
   - [Tunnel](#tunnel)
+  - [WARP](#warp)
 - [Data Model](#data-model)
 - [Rate Limiting](#rate-limiting)
 - [Development](#development)
@@ -37,7 +40,8 @@ A Node.js TypeScript SOCKS5 proxy that distributes outbound connections across d
 ## Features
 
 - **SOCKS5 with Password Auth** — Full RFC 1928 (SOCKS5) and RFC 1929 (Username/Password) support. Only CONNECT command; BIND and UDP ASSOCIATE are rejected.
-- **Built-in Tunnel Broker Client** — No IPv6 on the host? The proxy brings up a 6in4 tunnel itself and allocates from the routed prefix. A free Hurricane Electric tunnel hands out a `/48` — 2^80 addresses. See [No IPv6 on the Host?](#no-ipv6-on-the-host-use-a-tunnel-broker).
+- **Built-in Tunnel Broker Client** — No IPv6 on the host? The proxy brings up a 6in4 tunnel itself and allocates from the routed prefix. A free Hurricane Electric tunnel hands out a `/48` — 2^80 addresses. See [No IPv6 on the Host?](#no-ipv6-on-the-host).
+- **Built-in Cloudflare WARP Client** — Free IPv6 with no signup at all. The proxy registers WARP devices itself and brings up a WireGuard link per device; each one is another egress address to rotate across. See [Option 1: Cloudflare WARP](#option-1-cloudflare-warp-no-signup).
 - **Auto-Detect Subnets** — IPv6 subnets are automatically detected from host network interfaces on startup; no manual configuration needed
 - **Per-User IPv6 Allocation** — Two modes: `sticky` (same IPv6 address is reused for each user+subnet pair) and `random` (new address per connection, default)
 - **CDN Edge Borrowing** — Sites that publish no AAAA record are still reached over IPv6 through their CDN's dual-stack edge fleet, verified by certificate before use. See [Reaching IPv4-Only Names](#reaching-ipv4-only-names).
@@ -117,7 +121,7 @@ Both servers share the same core modules and SQLite database.
 ### Prerequisites
 
 - Linux with `net.ipv6.ip_nonlocal_bind=1` and `iproute2` installed
-- IPv6 connectivity — either native, or [tunnelled from a broker](#no-ipv6-on-the-host-use-a-tunnel-broker), which needs only IPv4 on the host
+- IPv6 connectivity — either native, or free from [Cloudflare WARP or a tunnel broker](#no-ipv6-on-the-host), both of which need only IPv4 on the host
 - Node.js 20+ (for manual deployment)
 - Docker (for container deployment)
 
@@ -189,9 +193,124 @@ Now use SOCKS5 proxy at `localhost:1080` with username `alice` and password `sec
 
 ---
 
-## No IPv6 on the Host? Use a Tunnel Broker
+## No IPv6 on the Host?
 
-A proxy that spreads connections across a subnet needs a subnet to spread them across. Most cheap VPSes hand out a single `/128`, or no IPv6 at all — which is where a tunnel broker comes in.
+A proxy that spreads connections across a subnet needs a subnet to spread them across. Most cheap VPSes hand out a single `/128`, or no IPv6 at all. There are two ways out, both free, and the proxy sets up either one itself — no `wg-quick`, no `ip tunnel`, no systemd units:
+
+| | Cloudflare WARP | Tunnel broker (6in4) |
+|---|---|---|
+| Signup | None at all | Free account at tunnelbroker.net |
+| What you get | One address per registered device | A routed `/48` — 2^80 addresses |
+| Carried over | WireGuard (UDP 2408) | 6in4 (IP protocol 41) |
+| Kernel needs | `wireguard` module | `sit` module |
+| Address diversity | As many as you register | Effectively unlimited |
+| Best when | You want IPv6 in one env var | You want a real prefix to spread across |
+
+They are independent — a host can run both, and the egress pool is simply the union. If you just want it working, start with WARP.
+
+---
+
+### Option 1: Cloudflare WARP (no signup)
+
+[Cloudflare WARP](https://1.1.1.1) hands out a globally routable IPv6 address over WireGuard, for free, to anyone who asks — no account, no email, no payment. Registering a device is a single unauthenticated API call, and the proxy makes it for you.
+
+```bash
+export WARP_ENABLED=true
+```
+
+That is the whole configuration. On startup the proxy registers a WARP device, brings up a WireGuard link to Cloudflare, and registers the assigned address as an allocation subnet:
+
+```
+info: Registered a Cloudflare WARP device { slot: 0, address: "2606:4700:110:8921:bf06:c4d7:40b7:8afd", accountType: "free" }
+info: WARP link is up { device: "warp0", endpoint: "162.159.192.1:2408", table: 51820, mtu: 1280 }
+info: WARP verified: reached [2606:4700:4700::1111]:53
+info: Registered IPv6 subnet { cidr: "2606:4700:110:8921:bf06:c4d7:40b7:8afd/128", source: "warp", boundUsers: 1 }
+```
+
+#### One account is one address
+
+This is the thing to understand about WARP, and the one real difference from a tunnel broker: **Cloudflare assigns a single `/128`, not a prefix.** One registration is one egress IP forever. For a proxy whose whole purpose is spreading connections across addresses, one is rarely enough.
+
+So register more:
+
+```bash
+export WARP_ENABLED=true
+export WARP_ACCOUNTS=8
+```
+
+Each account becomes its own WireGuard interface (`warp0`…`warp7`) with its own address, and each address is registered as a one-address subnet. From there the proxy's existing per-user subnet selection does the rotation with no extra machinery:
+
+- **`random` users** get a different WARP address on every connection.
+- **`sticky` users** are pinned to one WARP address and keep it across reconnects.
+
+Registrations are stored in the database and reused, so restarts keep the same addresses instead of burning through Cloudflare's registration quota. To deliberately rotate to a fresh set, start once with `WARP_RESET=true`; the addresses they replace are dropped from the pool automatically.
+
+#### WARP+ (optional)
+
+A WARP+ licence key raises Cloudflare's quota. It changes nothing about the addressing — the free tier already gives you the IPv6 address.
+
+```bash
+export WARP_LICENSE=xxxxxxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+#### Docker
+
+```yaml
+services:
+  ipv6-proxy:
+    image: ghcr.io/<your-username>/ipv6-subnet-proxy:latest
+    environment:
+      - API_KEY=changeme
+      - WARP_ENABLED=true
+      - WARP_ACCOUNTS=8
+    volumes:
+      - ./data:/data
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+    network_mode: host
+```
+
+One host-side requirement — WireGuard is a kernel module, and containers cannot load host modules themselves:
+
+```bash
+sudo modprobe wireguard
+echo wireguard | sudo tee /etc/modules-load.d/wireguard.conf
+```
+
+`network_mode: host` and `cap_add: NET_ADMIN` are both required: the links are built in the host's network namespace. The image ships `wireguard-tools`, so `wg` itself does not need installing.
+
+#### What it configures, per link
+
+| Step | Why |
+|---|---|
+| WireGuard device to Cloudflare's anycast endpoint | Carries IPv6 inside UDP to `engage.cloudflareclient.com:2408` |
+| The assigned `/128` on that device | This is the egress address, and the link's entire allocation pool |
+| Policy rule + route table | Traffic **sourced from** that address leaves through that link |
+
+Nothing is written to the main routing table. WARP here is an egress pool for the proxy, not a VPN for the whole box: the host's own traffic, and any native IPv6 it already has, are untouched. The rules sit at priority 1520 and up, ahead of the main table at 32766, so WARP-sourced traffic wins even on a host that has its own IPv6 default route.
+
+Bring-up is idempotent — each link tears its own device down first, so restarts and crashes leave nothing to clean up by hand.
+
+#### Checking it
+
+```bash
+curl -s http://localhost:3000/api/v1/warp -H "X-API-Key: $API_KEY" | jq
+```
+
+`links[].up` reports whether each device was built, `links[].probe` whether traffic actually passed over it, and `warnings` collects anything that degraded. `GET /api/v1/warp/accounts` lists the registered devices and their addresses without their keys. `POST /api/v1/warp/reconnect` rebuilds the links, `POST /api/v1/warp/verify` re-probes.
+
+If a link is up but its probe failed, the interface exists and the packets are being dropped in between — almost always UDP to port 2408 being blocked, or the `wireguard` module missing.
+
+#### Limits worth knowing
+
+WARP addresses come out of Cloudflare's own space and are widely shared, so sites that score IP reputation will treat them as VPN traffic. A tunnel broker's `/48` is yours alone and looks quite different to a target. Pick accordingly, or run both and bind users to the pool that suits them.
+
+---
+
+### Option 2: A Tunnel Broker (a whole routed prefix)
+
+Where WARP gives one address per registration, a tunnel broker gives a whole prefix.
 
 [Hurricane Electric](https://tunnelbroker.net) gives away, for free, a routed `/48`: 1,208,925,819,614,629,174,706,176 addresses, delivered over a 6in4 tunnel that needs nothing from the host but IPv4 and the `sit` kernel module. **The host itself never has to have IPv6.**
 
@@ -327,9 +446,36 @@ All configuration is via environment variables:
 | `BCRYPT_ROUNDS` | `10` | bcrypt hash rounds for password hashing |
 | `LOG_LEVEL` | `info` | Logging level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
 
+### Cloudflare WARP
+
+Free IPv6 with no signup — see [Option 1: Cloudflare WARP](#option-1-cloudflare-warp-no-signup). Off unless `WARP_ENABLED=true`; everything else has a working default.
+
+| Variable | Default | Description |
+|---|---|---|
+| `WARP_ENABLED` | `false` | Register WARP devices and bring up a WireGuard link for each |
+| `WARP_ACCOUNTS` | `1` | Devices to register (1-64). **Each one is one more egress address** — raise this to get a pool to rotate across |
+| `WARP_LICENSE` | — | WARP+ licence key. Optional; the free tier already provides the address |
+| `WARP_RESET` | `false` | Discard the stored registrations and register new devices. Rotates every WARP address; the old ones are dropped from the pool |
+| `WARP_REGISTER_SUBNETS` | `true` | Register each assigned address as a one-address (`/128`) allocation subnet |
+| `WARP_DEVICE_PREFIX` | `warp` | Interface names are this plus the slot number: `warp0`, `warp1`, … |
+| `WARP_MTU` | `1280` | Link MTU. 1280 is the IPv6 minimum and what WARP clients use |
+| `WARP_ROUTE_TABLE` | `51820` | First routing table; slot N uses this plus N |
+| `WARP_RULE_PRIORITY` | `1520` | First rule priority; slot N uses this plus N. Must stay below 32766 so the rules are consulted before the main table |
+| `WARP_KEEPALIVE` | `25` | WireGuard persistent-keepalive, in seconds. Keeps the NAT mapping open |
+| `WARP_ENDPOINT` | `engage.cloudflareclient.com:2408` | Cloudflare's WireGuard endpoint, used when the API names none. Set a literal address if DNS is unreliable |
+| `WARP_VERIFY` | `true` | Probe each link after bring-up and report the result |
+| `WARP_VERIFY_HOST` | `2606:4700:4700::1111` | Probe target (Cloudflare's resolver, which answers on TCP) |
+| `WARP_VERIFY_PORT` | `53` | Probe port |
+| `WARP_TEARDOWN_ON_EXIT` | `true` | Remove the devices, routes and rules on shutdown |
+| `WARP_REGISTER_DELAY_MS` | `1500` | Pause between registrations. Cloudflare rate-limits bursts |
+| `WARP_API_URL` | `https://api.cloudflareclient.com/v0a2158/reg` | Device registration API |
+| `WARP_CLIENT_VERSION` | `a-6.10-2158` | `CF-Client-Version` header sent with registrations |
+| `WARP_USER_AGENT` | `okhttp/3.12.1` | User agent sent with registrations |
+| `WARP_REQUEST_TIMEOUT_MS` | `15000` | Timeout for the API calls above |
+
 ### Tunnel Broker (6in4)
 
-Bring up a tunnelled IPv6 prefix on a host that has none of its own — see [No IPv6 on the Host?](#no-ipv6-on-the-host-use-a-tunnel-broker). Tunnel support switches itself on as soon as either the credentials or the manual endpoint settings are present.
+Bring up a tunnelled IPv6 prefix on a host that has none of its own — see [Option 2: A Tunnel Broker](#option-2-a-tunnel-broker-a-whole-routed-prefix). Tunnel support switches itself on as soon as either the credentials or the manual endpoint settings are present.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -600,6 +746,7 @@ Bind users to subnets. A user must be bound to at least one subnet to use the SO
 - `ip.refreshed`
 - `rate_limits.updated`
 - `tunnel.endpoint_updated`, `tunnel.reconnected`
+- `warp.reconnected`
 
 ### Resolver
 
@@ -638,7 +785,7 @@ Diagnostics for the IPv6 fallback ladder — see [Reaching IPv4-Only Names](#rea
 
 ### Tunnel
 
-Status and control for the 6in4 tunnel — see [No IPv6 on the Host?](#no-ipv6-on-the-host-use-a-tunnel-broker).
+Status and control for the 6in4 tunnel — see [Option 2: A Tunnel Broker](#option-2-a-tunnel-broker-a-whole-routed-prefix).
 
 | Method | Path | Description |
 |---|---|---|
@@ -674,6 +821,45 @@ Status and control for the 6in4 tunnel — see [No IPv6 on the Host?](#no-ipv6-o
 ```
 
 Credentials are never echoed back; `config.credentials` reports only `configured` or `none`.
+
+### WARP
+
+Status and control for the Cloudflare WARP links — see [Option 1: Cloudflare WARP](#option-1-cloudflare-warp-no-signup).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/warp` | WARP state: every link, its address, probe result and warnings |
+| `GET` | `/api/v1/warp/accounts` | The registered devices and their addresses, without their keys |
+| `POST` | `/api/v1/warp/verify` | Re-probe that traffic passes over each link |
+| `POST` | `/api/v1/warp/reconnect` | Rebuild the links from the stored registrations |
+
+**GET /api/v1/warp**
+
+```json
+{
+  "enabled": true,
+  "up": true,
+  "links": [
+    {
+      "slot": 0,
+      "device": "warp0",
+      "address": "2606:4700:110:8921:bf06:c4d7:40b7:8afd",
+      "cidr": "2606:4700:110:8921:bf06:c4d7:40b7:8afd/128",
+      "endpoint": "162.159.192.1:2408",
+      "table": 51820,
+      "accountType": "free",
+      "up": true,
+      "error": null,
+      "probe": { "source": "2606:4700:110:8921:bf06:c4d7:40b7:8afd", "ok": true, "detail": "reached [2606:4700:4700::1111]:53" }
+    }
+  ],
+  "cidrs": ["2606:4700:110:8921:bf06:c4d7:40b7:8afd/128"],
+  "startedAt": "2026-07-26T12:00:00.000Z",
+  "warnings": []
+}
+```
+
+WireGuard private keys and device tokens are never echoed back.
 
 ---
 
@@ -793,6 +979,8 @@ src/
 │   ├── cdn-providers.ts        # Known anycast CDN fingerprints and seeds
 │   ├── tunnel.ts               # 6in4 tunnel bring-up, routing, verification
 │   ├── tunnelbroker.ts         # tunnelbroker.net API + endpoint updates
+│   ├── warp.ts                 # WARP WireGuard links, routing, verification
+│   ├── warp-api.ts             # Cloudflare WARP device registration
 │   └── audit.ts                # Audit logging
 ├── socks5/
 │   └── server.ts               # SOCKS5 protocol implementation
@@ -810,14 +998,16 @@ src/
 │       ├── limits.ts           # Rate limit endpoints
 │       ├── audit.ts            # Audit log endpoints
 │       ├── resolver.ts         # IPv6 fallback diagnostics
-│       └── tunnel.ts           # Tunnel status and control
+│       ├── tunnel.ts           # Tunnel status and control
+│       └── warp.ts             # WARP status and control
 └── utils/
     ├── ipv6.ts                 # IPv6 address utilities
     └── logger.ts               # Pino logger
 
 test/
 ├── target-resolver.test.ts     # Fallback ladder tests (node:test)
-└── tunnel.test.ts              # Tunnel parsing, spec resolution, ip command plans
+├── tunnel.test.ts              # Tunnel parsing, spec resolution, ip command plans
+└── warp.test.ts                # WARP keys, registration parsing, ip/wg command plans
 
 scripts/
 └── check-ipv6.sh               # Offline IPv6 reachability check
@@ -860,7 +1050,7 @@ services:
 
 > **Note:** `network_mode: host` is required for IPv6 binding to work correctly in Docker. When using host networking, the port mappings are advisory and the container directly uses the host's network stack. It also means `net.ipv6.ip_nonlocal_bind=1` must be set on the *host* — the `sysctls:` entry above cannot apply to a namespace the container does not own.
 
-To bring up a [tunnel broker](#no-ipv6-on-the-host-use-a-tunnel-broker) tunnel from inside the container, the host must also have the `sit` module loaded (`modprobe sit`). The image ships `iproute2`, since BusyBox's `ip` cannot create tunnel devices.
+To bring up free IPv6 from inside the container, the host must have the matching kernel module loaded: `modprobe sit` for a [tunnel broker](#option-2-a-tunnel-broker-a-whole-routed-prefix), `modprobe wireguard` for [WARP](#option-1-cloudflare-warp-no-signup). The image ships `iproute2` (BusyBox's `ip` cannot create tunnel devices) and `wireguard-tools`.
 
 ---
 

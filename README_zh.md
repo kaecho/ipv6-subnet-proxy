@@ -11,7 +11,9 @@
 - [功能特性](#功能特性)
 - [架构设计](#架构设计)
 - [快速开始](#快速开始)
-- [宿主机没有 IPv6？用隧道代理商](#宿主机没有-ipv6用隧道代理商)
+- [宿主机没有 IPv6？](#宿主机没有-ipv6)
+  - [方案一：Cloudflare WARP](#方案一cloudflare-warp免注册)
+  - [方案二：隧道代理商](#方案二隧道代理商一整段路由前缀)
 - [配置说明](#配置说明)
 - [SOCKS5 代理使用](#socks5-代理使用)
 - [访问无 IPv6 解析的域名](#访问无-ipv6-解析的域名)
@@ -26,6 +28,7 @@
   - [审计日志](#审计日志)
   - [解析诊断](#解析诊断)
   - [隧道管理](#隧道管理)
+  - [WARP 管理](#warp-管理)
 - [数据模型](#数据模型)
 - [速率限制机制](#速率限制机制)
 - [开发指南](#开发指南)
@@ -37,7 +40,8 @@
 ## 功能特性
 
 - **SOCKS5 密码认证** — 完整实现 RFC 1928（SOCKS5）和 RFC 1929（用户名/密码）协议。支持 CONNECT 命令；BIND 和 UDP ASSOCIATE 请求将被拒绝。
-- **内置隧道代理商接入** — 宿主机本身没有 IPv6 也能部署：程序自行建立 6in4 隧道，并从隧道路由的前缀中分配地址。Hurricane Electric 免费提供一个 `/48`，即 2^80 个地址。详见[宿主机没有 IPv6？](#宿主机没有-ipv6用隧道代理商)。
+- **内置隧道代理商接入** — 宿主机本身没有 IPv6 也能部署：程序自行建立 6in4 隧道，并从隧道路由的前缀中分配地址。Hurricane Electric 免费提供一个 `/48`，即 2^80 个地址。详见[宿主机没有 IPv6？](#宿主机没有-ipv6)。
+- **内置 Cloudflare WARP 接入** — 完全免注册的免费 IPv6：程序自行注册 WARP 设备，并为每台设备建立一条 WireGuard 链路，每条链路就是一个可供轮换的出口地址。详见[方案一：Cloudflare WARP](#方案一cloudflare-warp免注册)。
 - **自动检测子网** — 启动时从宿主机网络接口自动检测 IPv6 子网，无需手动配置
 - **用户级 IPv6 分配** — 两种分配模式：`sticky`（同一用户+子网对复用固定 IPv6 地址）和 `random`（每次连接随机分配新地址，默认）
 - **CDN 边缘借用** — 未设置 AAAA 解析的站点，仍可通过其 CDN 的双栈边缘节点经 IPv6 访问；使用前先用证书验证。详见[访问无 IPv6 解析的域名](#访问无-ipv6-解析的域名)。
@@ -117,7 +121,7 @@
 ### 前置要求
 
 - 设置了 `net.ipv6.ip_nonlocal_bind=1` 并安装了 `iproute2` 的 Linux 系统
-- IPv6 连通性 — 原生 IPv6，或[由隧道代理商提供](#宿主机没有-ipv6用隧道代理商)（后者只要求宿主机有 IPv4）
+- IPv6 连通性 — 原生 IPv6，或[由 Cloudflare WARP / 隧道代理商免费提供](#宿主机没有-ipv6)（后两者只要求宿主机有 IPv4）
 - Node.js 20+（手动部署时需要）
 - Docker（容器部署时需要）
 
@@ -174,9 +178,124 @@ curl -X POST http://localhost:3000/api/v1/users \
 
 ---
 
-## 宿主机没有 IPv6？用隧道代理商
+## 宿主机没有 IPv6？
 
-要把连接分散到一个子网上，前提是得先有一个子网。而多数廉价 VPS 只给一个 `/128`，甚至完全不给 IPv6 —— 隧道代理商正是为此存在的。
+要把连接分散到一个子网上，前提是得先有一个子网。而多数廉价 VPS 只给一个 `/128`，甚至完全不给 IPv6。有两条免费的路子，而且两者都由本程序代为接入 —— 不用敲 `wg-quick`，不用敲 `ip tunnel`，也不用写 systemd 单元：
+
+| | Cloudflare WARP | 隧道代理商（6in4） |
+|---|---|---|
+| 注册 | 完全不需要 | 在 tunnelbroker.net 免费注册 |
+| 拿到什么 | 每注册一台设备得到一个地址 | 一整个路由的 `/48` —— 2^80 个地址 |
+| 承载方式 | WireGuard（UDP 2408） | 6in4（IP 协议号 41） |
+| 内核要求 | `wireguard` 模块 | `sit` 模块 |
+| 地址丰富度 | 取决于注册几个 | 基本无上限 |
+| 适用场景 | 只想改一个环境变量就有 IPv6 | 想要一整段前缀来分散连接 |
+
+两者互不影响 —— 同一台机器可以同时开，出口地址池就是二者的并集。如果只想快点跑起来，先用 WARP。
+
+---
+
+### 方案一：Cloudflare WARP（免注册）
+
+[Cloudflare WARP](https://1.1.1.1) 免费向任何人发放一个全球可路由的 IPv6 地址，走 WireGuard 承载 —— 不需要账号、不需要邮箱、不需要付费。注册一台设备只是一次无需鉴权的 API 调用，这一步由本程序代你完成。
+
+```bash
+export WARP_ENABLED=true
+```
+
+配置到此为止。启动时程序会注册一台 WARP 设备，建立到 Cloudflare 的 WireGuard 链路，并把拿到的地址注册为可分配子网：
+
+```
+info: Registered a Cloudflare WARP device { slot: 0, address: "2606:4700:110:8921:bf06:c4d7:40b7:8afd", accountType: "free" }
+info: WARP link is up { device: "warp0", endpoint: "162.159.192.1:2408", table: 51820, mtu: 1280 }
+info: WARP verified: reached [2606:4700:4700::1111]:53
+info: Registered IPv6 subnet { cidr: "2606:4700:110:8921:bf06:c4d7:40b7:8afd/128", source: "warp", boundUsers: 1 }
+```
+
+#### 一个账号只有一个地址
+
+这是 WARP 最需要先弄明白的一点，也是它与隧道代理商唯一实质的区别：**Cloudflare 分配的是单个 `/128`，不是一段前缀。** 一次注册就等于一个固定的出口 IP。而本程序的核心用途正是把连接分散到多个地址上，只有一个显然不够。
+
+所以就多注册几个：
+
+```bash
+export WARP_ENABLED=true
+export WARP_ACCOUNTS=8
+```
+
+每个账号都会成为一块独立的 WireGuard 网卡（`warp0`…`warp7`），各自持有一个地址，每个地址再注册成一个"只有一个地址的子网"。接下来无需任何额外机制，程序原有的按用户选子网逻辑就自动完成了轮换：
+
+- **`random` 模式的用户**：每建立一条连接换一个 WARP 地址。
+- **`sticky` 模式的用户**：固定绑在某一个 WARP 地址上，重连后依旧不变。
+
+注册信息会存进数据库并复用，因此重启后地址保持不变，也不会白白消耗 Cloudflare 的注册配额。想主动换一批地址，用 `WARP_RESET=true` 启动一次即可；被替换掉的旧地址会自动从地址池里剔除。
+
+#### WARP+（可选）
+
+WARP+ 授权密钥可以提高 Cloudflare 那边的配额。它不影响地址分配 —— 免费版本身就已经给了 IPv6 地址。
+
+```bash
+export WARP_LICENSE=xxxxxxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+#### Docker 部署
+
+```yaml
+services:
+  ipv6-proxy:
+    image: ghcr.io/<your-username>/ipv6-subnet-proxy:latest
+    environment:
+      - API_KEY=changeme
+      - WARP_ENABLED=true
+      - WARP_ACCOUNTS=8
+    volumes:
+      - ./data:/data
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+    network_mode: host
+```
+
+宿主机侧只有一个前置要求 —— WireGuard 是内核模块，容器无法自行加载宿主机的模块：
+
+```bash
+sudo modprobe wireguard
+echo wireguard | sudo tee /etc/modules-load.d/wireguard.conf
+```
+
+`network_mode: host` 与 `cap_add: NET_ADMIN` 两者缺一不可：链路是建立在宿主机的网络命名空间里的。镜像已内置 `wireguard-tools`，`wg` 本身不需要另行安装。
+
+#### 每条链路具体配置了什么
+
+| 步骤 | 作用 |
+|---|---|
+| 到 Cloudflare anycast 端点的 WireGuard 设备 | 把 IPv6 封装进发往 `engage.cloudflareclient.com:2408` 的 UDP |
+| 在该设备上配置分配到的 `/128` | 这既是出口地址，也是这条链路的全部地址池 |
+| 策略路由规则 + 独立路由表 | **以该地址为源**的流量从这条链路出去 |
+
+主路由表不会被写入任何内容。这里的 WARP 是给代理用的出口地址池，而不是给整台机器用的 VPN：宿主机自身的流量、以及它原有的原生 IPv6，都不受影响。规则优先级从 1520 起，排在主表（32766）之前，因此即便宿主机本身有 IPv6 默认路由，WARP 源地址的流量依然走 WARP。
+
+建链过程是幂等的 —— 每条链路会先拆掉自己的设备再重建，所以重启和崩溃都不会留下需要手工清理的残留。
+
+#### 状态检查
+
+```bash
+curl -s http://localhost:3000/api/v1/warp -H "X-API-Key: $API_KEY" | jq
+```
+
+`links[].up` 表示各设备是否建立成功，`links[].probe` 表示是否真的通了流量，`warnings` 汇总所有降级情况。`GET /api/v1/warp/accounts` 列出已注册的设备及其地址（不含密钥）。`POST /api/v1/warp/reconnect` 重建链路，`POST /api/v1/warp/verify` 重新探测。
+
+如果某条链路 up 但探测失败，说明网卡建起来了而包在中途被丢了 —— 绝大多数情况是发往 2408 端口的 UDP 被封，或者 `wireguard` 模块没加载。
+
+#### 需要知道的局限
+
+WARP 的地址来自 Cloudflare 自有网段且被大量用户共享，因此会对 IP 信誉打分的站点通常会把它当作 VPN 流量对待。而隧道代理商的 `/48` 是你独占的，在目标站点看来完全是另一回事。按需要选择，或者两者都开，再把用户绑定到合适的地址池上。
+
+---
+
+### 方案二：隧道代理商（一整段路由前缀）
+
+WARP 是一次注册给一个地址，而隧道代理商给的是一整段前缀。
 
 [Hurricane Electric](https://tunnelbroker.net) 免费提供一个路由的 `/48`：1,208,925,819,614,629,174,706,176 个地址，经由 6in4 隧道交付，对宿主机的全部要求只有 IPv4 和内核的 `sit` 模块。**宿主机自身完全不需要 IPv6。**
 
@@ -312,9 +431,36 @@ curl -s http://localhost:3000/api/v1/tunnel -H "X-API-Key: $API_KEY" | jq
 | `BCRYPT_ROUNDS` | `10` | 密码哈希的 bcrypt 轮次 |
 | `LOG_LEVEL` | `info` | 日志级别：`trace`、`debug`、`info`、`warn`、`error`、`fatal` |
 
+### Cloudflare WARP
+
+免注册的免费 IPv6，详见[方案一：Cloudflare WARP](#方案一cloudflare-warp免注册)。默认关闭，需设置 `WARP_ENABLED=true`；其余项都有可用的默认值。
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `WARP_ENABLED` | `false` | 注册 WARP 设备并为每台设备建立一条 WireGuard 链路 |
+| `WARP_ACCOUNTS` | `1` | 注册的设备数量（1-64）。**每台设备就是一个出口地址** —— 想要地址池轮换就调大它 |
+| `WARP_LICENSE` | — | WARP+ 授权密钥。可选，免费版本身就已提供地址 |
+| `WARP_RESET` | `false` | 丢弃已保存的注册信息并重新注册。会更换全部 WARP 地址，旧地址自动从地址池剔除 |
+| `WARP_REGISTER_SUBNETS` | `true` | 把每个分配到的地址注册为单地址（`/128`）可分配子网 |
+| `WARP_DEVICE_PREFIX` | `warp` | 网卡名 = 此前缀 + 槽位号，即 `warp0`、`warp1`… |
+| `WARP_MTU` | `1280` | 链路 MTU。1280 是 IPv6 最小 MTU，也是 WARP 客户端的取值 |
+| `WARP_ROUTE_TABLE` | `51820` | 起始路由表号，槽位 N 使用该值加 N |
+| `WARP_RULE_PRIORITY` | `1520` | 起始规则优先级，槽位 N 使用该值加 N。必须小于 32766，否则规则会排在主表之后而失效 |
+| `WARP_KEEPALIVE` | `25` | WireGuard persistent-keepalive 秒数，用于保持 NAT 映射 |
+| `WARP_ENDPOINT` | `engage.cloudflareclient.com:2408` | Cloudflare 的 WireGuard 端点，API 未返回时使用。DNS 不稳时可填字面地址 |
+| `WARP_VERIFY` | `true` | 建链后探测每条链路并汇报结果 |
+| `WARP_VERIFY_HOST` | `2606:4700:4700::1111` | 探测目标（Cloudflare 的解析器，支持 TCP） |
+| `WARP_VERIFY_PORT` | `53` | 探测端口 |
+| `WARP_TEARDOWN_ON_EXIT` | `true` | 退出时删除设备、路由和规则 |
+| `WARP_REGISTER_DELAY_MS` | `1500` | 两次注册之间的间隔。Cloudflare 会对突发注册限流 |
+| `WARP_API_URL` | `https://api.cloudflareclient.com/v0a2158/reg` | 设备注册 API |
+| `WARP_CLIENT_VERSION` | `a-6.10-2158` | 注册请求携带的 `CF-Client-Version` 头 |
+| `WARP_USER_AGENT` | `okhttp/3.12.1` | 注册请求携带的 User-Agent |
+| `WARP_REQUEST_TIMEOUT_MS` | `15000` | 上述 API 调用的超时时间 |
+
 ### 隧道代理商（6in4）
 
-在没有 IPv6 的宿主机上接入隧道前缀，详见[宿主机没有 IPv6？](#宿主机没有-ipv6用隧道代理商)。只要配置了账号凭据或手动端点参数，隧道功能即自动启用。
+在没有 IPv6 的宿主机上接入隧道前缀，详见[方案二：隧道代理商](#方案二隧道代理商一整段路由前缀)。只要配置了账号凭据或手动端点参数，隧道功能即自动启用。
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -584,6 +730,7 @@ www.akamai.com        YES     YES     -          YES     native=2600:1413:5000:3
 - `ip.refreshed`
 - `rate_limits.updated`
 - `tunnel.endpoint_updated`、`tunnel.reconnected`
+- `warp.reconnected`
 
 ### 解析诊断
 
@@ -622,7 +769,7 @@ IPv6 回退链的诊断接口，详见[访问无 IPv6 解析的域名](#访问�
 
 ### 隧道管理
 
-6in4 隧道的状态与控制接口，详见[宿主机没有 IPv6？](#宿主机没有-ipv6用隧道代理商)。
+6in4 隧道的状态与控制接口，详见[宿主机没有 IPv6？](#宿主机没有-ipv6)。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -658,6 +805,45 @@ IPv6 回退链的诊断接口，详见[访问无 IPv6 解析的域名](#访问�
 ```
 
 响应中不会回显任何凭据，`config.credentials` 只返回 `configured` 或 `none`。
+
+### WARP 管理
+
+Cloudflare WARP 链路的状态与控制接口，详见[方案一：Cloudflare WARP](#方案一cloudflare-warp免注册)。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/v1/warp` | WARP 状态：每条链路的地址、探测结果与告警 |
+| `GET` | `/api/v1/warp/accounts` | 已注册的设备及其地址（不含密钥） |
+| `POST` | `/api/v1/warp/verify` | 重新探测各条链路是否通流量 |
+| `POST` | `/api/v1/warp/reconnect` | 按已保存的注册信息重建链路 |
+
+**GET /api/v1/warp**
+
+```json
+{
+  "enabled": true,
+  "up": true,
+  "links": [
+    {
+      "slot": 0,
+      "device": "warp0",
+      "address": "2606:4700:110:8921:bf06:c4d7:40b7:8afd",
+      "cidr": "2606:4700:110:8921:bf06:c4d7:40b7:8afd/128",
+      "endpoint": "162.159.192.1:2408",
+      "table": 51820,
+      "accountType": "free",
+      "up": true,
+      "error": null,
+      "probe": { "source": "2606:4700:110:8921:bf06:c4d7:40b7:8afd", "ok": true, "detail": "reached [2606:4700:4700::1111]:53" }
+    }
+  ],
+  "cidrs": ["2606:4700:110:8921:bf06:c4d7:40b7:8afd/128"],
+  "startedAt": "2026-07-26T12:00:00.000Z",
+  "warnings": []
+}
+```
+
+响应中不会回显 WireGuard 私钥和设备 token。
 
 ---
 
@@ -794,7 +980,8 @@ src/
 │       ├── limits.ts           # 速率限制端点
 │       ├── audit.ts            # 审计日志端点
 │       ├── resolver.ts         # IPv6 回退诊断端点
-│       └── tunnel.ts           # 隧道状态与控制端点
+│       ├── tunnel.ts           # 隧道状态与控制
+│       └── warp.ts             # WARP 状态与控制端点
 └── utils/
     ├── ipv6.ts                 # IPv6 地址工具
     └── logger.ts               # Pino 日志器
@@ -844,7 +1031,7 @@ services:
 
 > **注意：** 在 Docker 中，IPv6 绑定需要 `network_mode: host` 才能正常工作。使用主机网络模式时，端口映射仅起说明作用，容器将直接使用主机的网络栈。这也意味着 `net.ipv6.ip_nonlocal_bind=1` 必须设置在*宿主机*上 —— 上面的 `sysctls:` 无法作用于容器并不拥有的命名空间。
 
-若要在容器内建立[隧道代理商](#宿主机没有-ipv6用隧道代理商)隧道，宿主机还需加载 `sit` 模块（`modprobe sit`）。镜像已内置 `iproute2`，因为 BusyBox 的 `ip` 无法创建隧道设备。
+若要在容器内接入免费 IPv6，宿主机需加载对应的内核模块：[隧道代理商](#方案二隧道代理商一整段路由前缀)用 `modprobe sit`，[WARP](#方案一cloudflare-warp免注册)用 `modprobe wireguard`。镜像已内置 `iproute2`（BusyBox 的 `ip` 无法创建隧道设备）和 `wireguard-tools`。
 
 ---
 

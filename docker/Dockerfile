@@ -9,7 +9,8 @@ RUN npm run build
 FROM node:20-alpine
 # iproute2: BusyBox's `ip` cannot create sit devices or add `local` routes,
 # both of which the 6in4 tunnel bring-up needs.
-RUN apk add --no-cache tini iproute2
+# wireguard-tools: `wg`, used to configure the Cloudflare WARP links.
+RUN apk add --no-cache tini iproute2 wireguard-tools
 WORKDIR /app
 COPY --from=builder /app/dist/ ./dist/
 COPY --from=builder /app/node_modules/ ./node_modules/

@@ -1,7 +1,7 @@
 {
   "name": "ipv6-subnet-proxy",
-  "version": "1.4.0",
-  "description": "SOCKS5 proxy that distributes connections across an IPv6 subnet, with built-in 6in4 tunnel broker support",
+  "version": "1.5.0",
+  "description": "SOCKS5 proxy that distributes connections across an IPv6 subnet, with built-in Cloudflare WARP and 6in4 tunnel broker support",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
