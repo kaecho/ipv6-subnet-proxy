@@ -135,9 +135,18 @@ export function isReservedIPv6(addr: string): boolean {
  * Skip candidates: loopback, link-local (fe80::/10), unspecified,
  * multicast (ff00::/8), and addresses with a /128 prefix (single-host).
  */
-export function detectIPv6Subnets(): string[] {
+export function detectIPv6Subnets(exclude: string[] = []): string[] {
   const ifaces = os.networkInterfaces();
   const subnets = new Set<string>();
+  const excluded = new Set(
+    exclude.map((c) => {
+      try {
+        return normalizeCIDR(c);
+      } catch {
+        return c;
+      }
+    })
+  );
 
   for (const [name, addrs] of Object.entries(ifaces)) {
     if (!addrs) continue;
@@ -177,6 +186,9 @@ export function detectIPv6Subnets(): string[] {
       try {
         const network = networkAddressFromCIDR(ipStr, prefixLen);
         const subnetCidr = normalizeCIDR(`${network}/${prefixLen}`);
+        // The 6in4 link prefix is one of these, but only our single tunnel
+        // address inside it is ours to allocate from.
+        if (excluded.has(subnetCidr)) continue;
         subnets.add(subnetCidr);
       } catch {
         // silently skip malformed addresses
@@ -249,6 +261,18 @@ function prefixLengthFromNetmask(netmask: string): number {
   return bits;
 }
 
+/** True if `addr` falls inside `cidr`. */
+export function isAddressInCIDR(addr: string, cidr: string): boolean {
+  try {
+    const { prefix, prefixLength } = parseCIDR(cidr);
+    const network = networkAddressFromCIDR(prefix, prefixLength);
+    const expanded = parseCIDR(`${addr}/128`).prefix;
+    return networkAddressFromCIDR(expanded, prefixLength) === network;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Given an IPv6 address and a prefix length, compute the network address
  * (all host bits zeroed). E.g., "2001:db8:1::1" / 64 => "2001:db8:1::"
@@ -288,7 +312,47 @@ function networkAddressFromCIDR(address: string, prefixLen: number): string {
 // --- Interface address binding for LXC / non-Docker deployments ---
 
 let _outboundInterface: string | null = null;
-const _registeredAddrs = new Map<string, number>();
+const _registeredAddrs = new Map<string, { refs: number; iface: string }>();
+/** Prefixes that live on a specific device — currently the 6in4 tunnel's. */
+const _prefixInterfaces: { cidr: string; iface: string }[] = [];
+
+/**
+ * Pin a prefix to a device, so addresses from it are added there instead of on
+ * the host's own outbound interface. A tunnelled prefix reaches the internet
+ * through the tunnel device and nowhere else.
+ */
+export function registerInterfaceForPrefix(cidr: string, iface: string): void {
+  const normalized = normalizeCIDR(cidr);
+  const existing = _prefixInterfaces.find((p) => p.cidr === normalized);
+  if (existing) {
+    existing.iface = iface;
+    return;
+  }
+  _prefixInterfaces.push({ cidr: normalized, iface });
+}
+
+export function clearPrefixInterfaces(iface?: string): void {
+  const keep = iface ? _prefixInterfaces.filter((p) => p.iface !== iface) : [];
+  _prefixInterfaces.length = 0;
+  _prefixInterfaces.push(...keep);
+}
+
+/** The device an address should be configured on: its pinned prefix, else the default one. */
+export function interfaceForAddress(addr: string): string {
+  let best: { cidr: string; iface: string } | null = null;
+  for (const entry of _prefixInterfaces) {
+    if (!isAddressInCIDR(addr, entry.cidr)) continue;
+    if (!best || parseCIDR(entry.cidr).prefixLength > parseCIDR(best.cidr).prefixLength) {
+      best = entry;
+    }
+  }
+  return best ? best.iface : getOutboundInterface();
+}
+
+/** Drop the cached outbound interface — call after the routing table changes. */
+export function resetOutboundInterface(): void {
+  _outboundInterface = null;
+}
 
 /**
  * Detect or return the cached outbound network interface (the one
@@ -343,19 +407,24 @@ export function getOutboundInterface(): string {
  * solicitations, so return packets reach the container.
  */
 export function registerIPv6Address(addr: string): void {
-  const refs = _registeredAddrs.get(addr) ?? 0;
-  if (refs === 0) {
-    const iface = getOutboundInterface();
-    try {
-      execFileSync('ip', ['-6', 'addr', 'add', `${addr}/128`, 'dev', iface], {
-        timeout: 3000,
-      });
-    } catch {
-      // Address may already exist on the interface (e.g., from a previous
-      // run) — still track it for refcounted cleanup.
-    }
+  const entry = _registeredAddrs.get(addr);
+  if (entry) {
+    entry.refs++;
+    return;
   }
-  _registeredAddrs.set(addr, refs + 1);
+
+  const iface = interfaceForAddress(addr);
+  try {
+    execFileSync('ip', ['-6', 'addr', 'add', `${addr}/128`, 'dev', iface], {
+      timeout: 3000,
+    });
+  } catch {
+    // Address may already exist on the interface (e.g., from a previous
+    // run) — still track it for refcounted cleanup.
+  }
+  // Remember where it was put: the tunnel may be torn down and re-detected
+  // before this address is released.
+  _registeredAddrs.set(addr, { refs: 1, iface });
 }
 
 /**
@@ -364,22 +433,15 @@ export function registerIPv6Address(addr: string): void {
  * Safe to call on addresses that were never registered.
  */
 export function unregisterIPv6Address(addr: string): void {
-  const refs = _registeredAddrs.get(addr);
-  if (refs === undefined) return;
+  const entry = _registeredAddrs.get(addr);
+  if (entry === undefined) return;
 
-  if (refs > 1) {
-    _registeredAddrs.set(addr, refs - 1);
+  if (entry.refs > 1) {
+    entry.refs--;
     return;
   }
 
-  const iface = getOutboundInterface();
-  try {
-    execFileSync('ip', ['-6', 'addr', 'del', `${addr}/128`, 'dev', iface], {
-      timeout: 3000,
-    });
-  } catch {
-    // best-effort cleanup
-  }
+  removeAddressFromInterface(addr, entry.iface);
   _registeredAddrs.delete(addr);
 }
 
@@ -387,14 +449,8 @@ export function unregisterIPv6Address(addr: string): void {
  * Force-remove an address regardless of refcount (sticky refresh / user delete).
  */
 export function forceUnregisterIPv6Address(addr: string): void {
-  const iface = getOutboundInterface();
-  try {
-    execFileSync('ip', ['-6', 'addr', 'del', `${addr}/128`, 'dev', iface], {
-      timeout: 3000,
-    });
-  } catch {
-    // best-effort — may not be on interface in this process
-  }
+  const entry = _registeredAddrs.get(addr);
+  removeAddressFromInterface(addr, entry ? entry.iface : interfaceForAddress(addr));
   _registeredAddrs.delete(addr);
 }
 
@@ -402,15 +458,18 @@ export function forceUnregisterIPv6Address(addr: string): void {
  * Remove all registered addresses (called on graceful shutdown).
  */
 export function unregisterAllIPv6Addresses(): void {
-  const iface = getOutboundInterface();
-  for (const addr of _registeredAddrs.keys()) {
-    try {
-      execFileSync('ip', ['-6', 'addr', 'del', `${addr}/128`, 'dev', iface], {
-        timeout: 3000,
-      });
-    } catch {
-      // best-effort
-    }
+  for (const [addr, entry] of _registeredAddrs) {
+    removeAddressFromInterface(addr, entry.iface);
   }
   _registeredAddrs.clear();
+}
+
+function removeAddressFromInterface(addr: string, iface: string): void {
+  try {
+    execFileSync('ip', ['-6', 'addr', 'del', `${addr}/128`, 'dev', iface], {
+      timeout: 3000,
+    });
+  } catch {
+    // best-effort — may not be on the interface in this process
+  }
 }

@@ -10,6 +10,25 @@ services:
       - API_KEY=changeme
       - DEFAULT_SUBNET=
       - LOG_LEVEL=info
+      # --- IPv6 via a free tunnel broker -----------------------------------
+      # A host with no IPv6 of its own can still run this proxy: tunnelbroker.net
+      # routes a /48 over a 6in4 tunnel, and the proxy sets that tunnel up.
+      # Hand it credentials and the tunnel id, and it reads the rest from the API
+      # and keeps the endpoint pointed at this host's current public IPv4.
+      # - HE_TUNNEL_ID=1033580
+      # - HE_TUNNEL_USERNAME=your-he-account
+      # - HE_TUNNEL_PASSWORD=your-he-password
+      # If the tunnel has an Update Key set (Advanced tab), use it instead:
+      # - HE_TUNNEL_UPDATE_KEY=your-update-key
+      #
+      # Or paste the tunnel details and skip the API entirely:
+      # - HE_TUNNEL_SERVER_IPV4=216.218.221.42
+      # - HE_TUNNEL_CLIENT_IPV6=2001:470:35:380::2/64
+      # - HE_TUNNEL_ROUTED_PREFIXES=2001:470:ecf2::/48,2001:470:36:37f::/64
+      #
+      # Behind NAT, point the tunnel at the LAN address and forward protocol 41:
+      # - HE_TUNNEL_LOCAL_IPV4=192.168.1.20
+      # ---------------------------------------------------------------------
       # Names without an AAAA record are reached through their CDN's
       # dual-stack edge fleet. On by default; see the README for the full set.
       # - CDN_FALLBACK_ENABLED=true
@@ -21,8 +40,12 @@ services:
       # - NAT64_PREFIX=64:ff9b::/96
     volumes:
       - ./data:/data
+      # Only needed if the host has not loaded the sit module itself; lets the
+      # container run `modprobe sit` (with cap_add SYS_MODULE below).
+      # - /lib/modules:/lib/modules:ro
     cap_add:
       - NET_ADMIN
+      # - SYS_MODULE
     sysctls:
       - net.ipv6.ip_nonlocal_bind=1
     restart: unless-stopped

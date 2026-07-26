@@ -5,6 +5,7 @@ import { runMigrations } from './database/migrations';
 import { createSocks5Server } from './socks5/server';
 import { createApiServer } from './api/server';
 import { addSubnet } from './core/subnets';
+import { startTunnel, stopTunnel, startEndpointWatcher } from './core/tunnel';
 import { detectIPv6Subnets, unregisterAllIPv6Addresses } from './utils/ipv6';
 
 async function main(): Promise<void> {
@@ -19,11 +20,23 @@ async function main(): Promise<void> {
   runMigrations(db);
   log.info({ dbPath: config.dbPath }, 'Database initialized');
 
+  // Bring up the 6in4 tunnel first: on a host with no IPv6 of its own, the
+  // prefix it carries is the only thing there is to allocate from.
+  const tunnel = await startTunnel(config.tunnel);
+  const tunnelPrefixes = tunnel.up && config.tunnel.registerSubnets
+    ? tunnel.spec?.routedPrefixes ?? []
+    : [];
+  if (tunnel.enabled) {
+    startEndpointWatcher(config.tunnel);
+  }
+
   // Auto-detect only when DEFAULT_SUBNET is not set (env is authoritative).
   let detectedSubnets: string[] = [];
   if (!config.defaultSubnet) {
     log.info('Scanning network interfaces for IPv6 subnets...');
-    detectedSubnets = detectIPv6Subnets();
+    // The tunnel link prefix shows up as an interface subnet, but only our one
+    // endpoint address in it is ours; the routed prefixes are the pool.
+    detectedSubnets = detectIPv6Subnets(tunnel.spec ? [tunnel.spec.linkPrefix] : []);
     log.info({ count: detectedSubnets.length, subnets: detectedSubnets },
       detectedSubnets.length > 0
         ? 'IPv6 subnet detection complete'
@@ -59,9 +72,25 @@ async function main(): Promise<void> {
     }
   }
 
-  if (detectedSubnets.length === 0 && !config.defaultSubnet) {
+  // Prefixes routed to the tunnel — registered regardless of DEFAULT_SUBNET,
+  // since the broker routes them here and nothing else can claim them.
+  for (const cidr of tunnelPrefixes) {
+    try {
+      addSubnet(cidr);
+      log.info({ cidr }, 'Registered tunnel-routed IPv6 subnet');
+    } catch (err: any) {
+      if (err.message?.includes('UNIQUE constraint')) {
+        log.info({ cidr }, 'Tunnel-routed subnet already registered');
+      } else {
+        log.warn({ cidr, err: err.message }, 'Failed to register tunnel-routed subnet');
+      }
+    }
+  }
+
+  if (detectedSubnets.length === 0 && tunnelPrefixes.length === 0 && !config.defaultSubnet) {
     log.warn('No IPv6 subnets detected and no DEFAULT_SUBNET configured. ' +
-      'Users will not be able to make proxied connections until a subnet is added.');
+      'Users will not be able to make proxied connections until a subnet is added. ' +
+      'A host without IPv6 can get a routed prefix from a free tunnel broker — see HE_TUNNEL_* in the README.');
   }
 
   // SOCKS5
@@ -81,6 +110,8 @@ async function main(): Promise<void> {
     socks5Server.close();
     apiServer.close().then(() => {
       unregisterAllIPv6Addresses();
+      // After the addresses, so their removal still finds the tunnel device.
+      stopTunnel();
       closeDb();
       log.info('Shutdown complete');
       process.exit(0);

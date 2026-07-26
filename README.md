@@ -11,6 +11,7 @@ A Node.js TypeScript SOCKS5 proxy that distributes outbound connections across d
 - [Features](#features)
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
+- [No IPv6 on the Host? Use a Tunnel Broker](#no-ipv6-on-the-host-use-a-tunnel-broker)
 - [Configuration](#configuration)
 - [SOCKS5 Proxy Usage](#socks5-proxy-usage)
 - [Reaching IPv4-Only Names](#reaching-ipv4-only-names)
@@ -24,6 +25,7 @@ A Node.js TypeScript SOCKS5 proxy that distributes outbound connections across d
   - [Rate Limits](#rate-limits)
   - [Audit Logs](#audit-logs)
   - [Resolver](#resolver)
+  - [Tunnel](#tunnel)
 - [Data Model](#data-model)
 - [Rate Limiting](#rate-limiting)
 - [Development](#development)
@@ -35,6 +37,7 @@ A Node.js TypeScript SOCKS5 proxy that distributes outbound connections across d
 ## Features
 
 - **SOCKS5 with Password Auth** — Full RFC 1928 (SOCKS5) and RFC 1929 (Username/Password) support. Only CONNECT command; BIND and UDP ASSOCIATE are rejected.
+- **Built-in Tunnel Broker Client** — No IPv6 on the host? The proxy brings up a 6in4 tunnel itself and allocates from the routed prefix. A free Hurricane Electric tunnel hands out a `/48` — 2^80 addresses. See [No IPv6 on the Host?](#no-ipv6-on-the-host-use-a-tunnel-broker).
 - **Auto-Detect Subnets** — IPv6 subnets are automatically detected from host network interfaces on startup; no manual configuration needed
 - **Per-User IPv6 Allocation** — Two modes: `sticky` (same IPv6 address is reused for each user+subnet pair) and `random` (new address per connection, default)
 - **CDN Edge Borrowing** — Sites that publish no AAAA record are still reached over IPv6 through their CDN's dual-stack edge fleet, verified by certificate before use. See [Reaching IPv4-Only Names](#reaching-ipv4-only-names).
@@ -113,7 +116,8 @@ Both servers share the same core modules and SQLite database.
 
 ### Prerequisites
 
-- Linux with IPv6 enabled and `net.ipv6.ip_nonlocal_bind=1`
+- Linux with `net.ipv6.ip_nonlocal_bind=1` and `iproute2` installed
+- IPv6 connectivity — either native, or [tunnelled from a broker](#no-ipv6-on-the-host-use-a-tunnel-broker), which needs only IPv4 on the host
 - Node.js 20+ (for manual deployment)
 - Docker (for container deployment)
 
@@ -185,6 +189,128 @@ Now use SOCKS5 proxy at `localhost:1080` with username `alice` and password `sec
 
 ---
 
+## No IPv6 on the Host? Use a Tunnel Broker
+
+A proxy that spreads connections across a subnet needs a subnet to spread them across. Most cheap VPSes hand out a single `/128`, or no IPv6 at all — which is where a tunnel broker comes in.
+
+[Hurricane Electric](https://tunnelbroker.net) gives away, for free, a routed `/48`: 1,208,925,819,614,629,174,706,176 addresses, delivered over a 6in4 tunnel that needs nothing from the host but IPv4 and the `sit` kernel module. **The host itself never has to have IPv6.**
+
+The proxy sets that tunnel up on its own. Create the tunnel on tunnelbroker.net, hand over the credentials, and it does the rest — no `ip tunnel` commands, no `/etc/network/interfaces`, no separate `he-ipv6.service`.
+
+### Option A: credentials (recommended)
+
+Register at [tunnelbroker.net](https://tunnelbroker.net), create a regular tunnel, click **Assign /48** on its page, then:
+
+```bash
+export HE_TUNNEL_ID=1033580          # "Tunnel ID" on the tunnel page
+export HE_TUNNEL_USERNAME=your-account
+export HE_TUNNEL_PASSWORD=your-password
+```
+
+On startup the proxy reads the tunnel's endpoints and routed prefixes from the [tunnelbroker API](https://forums.he.net/index.php?topic=3153.0), points the tunnel at this host's current public IPv4, builds the `sit` device, and registers the routed prefixes as allocation subnets. The log tells the whole story:
+
+```
+info: Fetched tunnel details from tunnelbroker.net { tunnelId: "1033580", routed48: "2001:470:ecf2::/48" }
+info: Tunnel endpoint set to 203.0.113.9
+info: 6in4 tunnel is up { device: "he-ipv6", routed: ["2001:470:ecf2::/48"], mtu: 1480 }
+info: Tunnel verified: reached [2001:470:20::2]:53
+info: Registered tunnel-routed IPv6 subnet { cidr: "2001:470:ecf2::/48" }
+```
+
+> If the tunnel has an **Update Key** set (its *Advanced* tab), HE requires that key rather than the account password: put it in `HE_TUNNEL_UPDATE_KEY`. It is the safer thing to deploy — it only grants control of that one tunnel.
+
+### Option B: paste the tunnel details
+
+No account credentials on the server. Copy four values off the tunnel page:
+
+| Tunnel page | Environment variable |
+|---|---|
+| Server IPv4 Address | `HE_TUNNEL_SERVER_IPV4` |
+| Client IPv6 Address | `HE_TUNNEL_CLIENT_IPV6` |
+| Routed /48 (and/or Routed /64) | `HE_TUNNEL_ROUTED_PREFIXES` |
+| Server IPv6 Address _(optional)_ | `HE_TUNNEL_SERVER_IPV6` |
+
+```bash
+export HE_TUNNEL_SERVER_IPV4=216.218.221.42
+export HE_TUNNEL_CLIENT_IPV6=2001:470:1f04:17b::2/64
+export HE_TUNNEL_ROUTED_PREFIXES=2001:470:8123::/48,2001:470:1f05:17b::/64
+```
+
+These describe a plain RFC 4213 6in4 tunnel, so Option B works with any tunnel broker, not just HE. Only the API and endpoint-update features are HE-specific.
+
+Set both and the environment wins — useful for overriding one field without giving up the API.
+
+### Docker
+
+```yaml
+services:
+  ipv6-proxy:
+    image: ghcr.io/<your-username>/ipv6-subnet-proxy:latest
+    environment:
+      - API_KEY=changeme
+      - HE_TUNNEL_ID=1033580
+      - HE_TUNNEL_USERNAME=your-account
+      - HE_TUNNEL_UPDATE_KEY=your-update-key
+    volumes:
+      - ./data:/data
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+    network_mode: host
+```
+
+Two host-side requirements, because kernel state is not namespaced away from you here:
+
+```bash
+# 1. The 6in4 module. Containers cannot load host modules themselves.
+sudo modprobe sit
+echo sit | sudo tee /etc/modules-load.d/sit.conf
+
+# 2. Binding to addresses that are not configured on an interface.
+sudo sysctl -w net.ipv6.ip_nonlocal_bind=1
+echo net.ipv6.ip_nonlocal_bind=1 | sudo tee /etc/sysctl.d/99-ipv6-proxy.conf
+```
+
+`network_mode: host` and `cap_add: NET_ADMIN` are both required: the tunnel is built in the host's network namespace.
+
+### What it configures
+
+| Step | Why |
+|---|---|
+| `sit` device to the broker's IPv4 endpoint | Carries IPv6 inside IPv4 packets (protocol 41) |
+| Client address on the tunnel link | Our end of the point-to-point link |
+| Policy rule + route table for each routed prefix | Traffic **sourced from** the tunnel's prefixes leaves through the tunnel |
+| `local` route for each routed prefix | Lets any address in the `/48` answer without being configured first |
+| Default route in the main table | Only when the host has none of its own — see `HE_TUNNEL_DEFAULT_ROUTE` |
+
+The policy-routing split is what makes this safe to enable on a host that *already* has native IPv6: its own traffic keeps using the native path, and only addresses out of the tunnelled prefixes ride the tunnel. Bring-up is idempotent — it tears down its own device first, so restarts and crashes leave nothing behind to clean up by hand.
+
+### Dynamic IP addresses
+
+A 6in4 tunnel only carries traffic while the broker's *Client IPv4* matches the host's actual public address. With credentials configured, the proxy re-checks its public IPv4 every 15 minutes (`HE_TUNNEL_UPDATE_INTERVAL_MS`) and, when it changes, updates the tunnel and rebuilds the device. Home connections and re-created VPSes survive on their own.
+
+### Behind NAT
+
+The tunnel still works: anchor it to the LAN address and forward IP protocol 41 (not a TCP or UDP port — protocol 41 itself) from the router to the host.
+
+```bash
+export HE_TUNNEL_LOCAL_IPV4=192.168.1.20
+```
+
+Left unset, the proxy detects it and logs a warning naming the address it chose.
+
+### Checking it
+
+```bash
+curl -s http://localhost:3000/api/v1/tunnel -H "X-API-Key: $API_KEY" | jq
+```
+
+`up` reports whether the device was built, `probes` whether traffic actually passed over it, and `warnings` collects anything that degraded — a missing sysctl, a rejected credential, a kernel without policy routing. `POST /api/v1/tunnel/reconnect` rebuilds it, `POST /api/v1/tunnel/verify` re-probes.
+
+If `up` is true but every probe failed, the tunnel exists locally and the packets are being dropped in between. In order of likelihood: the broker's Client IPv4 does not match this host, protocol 41 is filtered by the provider or a NAT in front, or the `sit` module is missing.
+
+---
+
 ## Configuration
 
 All configuration is via environment variables:
@@ -200,6 +326,40 @@ All configuration is via environment variables:
 | `DEFAULT_SUBNET_GATEWAY` | — | Gateway address for the default subnet |
 | `BCRYPT_ROUNDS` | `10` | bcrypt hash rounds for password hashing |
 | `LOG_LEVEL` | `info` | Logging level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
+
+### Tunnel Broker (6in4)
+
+Bring up a tunnelled IPv6 prefix on a host that has none of its own — see [No IPv6 on the Host?](#no-ipv6-on-the-host-use-a-tunnel-broker). Tunnel support switches itself on as soon as either the credentials or the manual endpoint settings are present.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HE_TUNNEL_ENABLED` | _(auto)_ | On when credentials or manual endpoint settings are configured. Set `false` to keep them configured but unused |
+| `HE_TUNNEL_ID` | — | Tunnel ID from the tunnelbroker.net tunnel page |
+| `HE_TUNNEL_USERNAME` | — | tunnelbroker.net account name |
+| `HE_TUNNEL_PASSWORD` | — | Account password. Not used when an Update Key is set on the tunnel |
+| `HE_TUNNEL_UPDATE_KEY` | — | Per-tunnel Update Key (tunnel → *Advanced*). Required instead of the password when set, and safer to deploy |
+| `HE_TUNNEL_SERVER_IPV4` | _(from API)_ | Broker-side IPv4 endpoint — "Server IPv4 Address" |
+| `HE_TUNNEL_SERVER_IPV6` | _(from API)_ | Broker-side IPv6 address — "Server IPv6 Address" |
+| `HE_TUNNEL_CLIENT_IPV6` | _(from API)_ | This host's address on the tunnel link, e.g. `2001:470:1f04:17b::2/64` |
+| `HE_TUNNEL_ROUTED_PREFIXES` | _(from API)_ | Comma-separated prefixes routed to the tunnel. These become the allocation subnets |
+| `HE_TUNNEL_LOCAL_IPV4` | _(detected)_ | Local IPv4 to anchor the tunnel to. Set to the LAN address when behind NAT |
+| `HE_TUNNEL_DEVICE` | `he-ipv6` | Name of the `sit` device to create |
+| `HE_TUNNEL_MTU` | `1480` | Tunnel MTU. 1480 is what 6in4 leaves of a 1500-byte path |
+| `HE_TUNNEL_TTL` | `255` | TTL of the outer IPv4 packets |
+| `HE_TUNNEL_ROUTE_TABLE` | `1470` | Routing table for tunnel-sourced traffic, and the rule priority |
+| `HE_TUNNEL_DEFAULT_ROUTE` | `auto` | `auto` adds a default route only if the host has none; `always` adds it regardless; `never` leaves the main table untouched |
+| `HE_TUNNEL_FORWARDING` | `false` | Enable `net.ipv6.conf.all.forwarding`. Only needed to route the prefix onward to other hosts |
+| `HE_TUNNEL_REGISTER_SUBNETS` | `true` | Register the routed prefixes as allocation subnets on startup |
+| `HE_TUNNEL_UPDATE_ENDPOINT` | _(on with credentials)_ | Point the tunnel at this host's public IPv4 during startup |
+| `HE_TUNNEL_UPDATE_INTERVAL_MS` | `900000` | Re-check the public IPv4 this often and update on change. `0` disables. Clamped to a 60 s minimum |
+| `HE_TUNNEL_VERIFY` | `true` | Probe the tunnel after bring-up and report the result |
+| `HE_TUNNEL_VERIFY_HOST` | `2001:470:20::2` | Probe target (HE's anycast resolver, which answers on TCP) |
+| `HE_TUNNEL_VERIFY_PORT` | `53` | Probe port |
+| `HE_TUNNEL_TEARDOWN_ON_EXIT` | `true` | Remove the device, routes and rules on shutdown |
+| `HE_TUNNEL_PUBLIC_IPV4_URL` | `https://checkip.amazonaws.com` | Where to look up this host's public IPv4 |
+| `HE_TUNNEL_API_URL` | `https://tunnelbroker.net/tunnelInfo.php` | Tunnel info API |
+| `HE_TUNNEL_UPDATE_URL` | `https://ipv4.tunnelbroker.net/nic/update` | Endpoint update API (dyndns protocol) |
+| `HE_TUNNEL_REQUEST_TIMEOUT_MS` | `10000` | Timeout for the API calls above |
 
 ### IPv6 Fallback
 
@@ -439,6 +599,7 @@ Bind users to subnets. A user must be bound to at least one subnet to use the SO
 - `binding.created`, `binding.deleted`
 - `ip.refreshed`
 - `rate_limits.updated`
+- `tunnel.endpoint_updated`, `tunnel.reconnected`
 
 ### Resolver
 
@@ -474,6 +635,45 @@ Diagnostics for the IPv6 fallback ladder — see [Reaching IPv4-Only Names](#rea
 ```
 
 `route` is `null` and `error` is set when no IPv6 path exists.
+
+### Tunnel
+
+Status and control for the 6in4 tunnel — see [No IPv6 on the Host?](#no-ipv6-on-the-host-use-a-tunnel-broker).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/tunnel` | Tunnel state: device, spec, probes, warnings |
+| `POST` | `/api/v1/tunnel/verify` | Re-probe that traffic passes over the tunnel |
+| `POST` | `/api/v1/tunnel/endpoint` | Point the tunnel at this host's current public IPv4 |
+| `POST` | `/api/v1/tunnel/reconnect` | Rebuild the tunnel from current settings |
+
+**GET /api/v1/tunnel**
+
+```json
+{
+  "enabled": true,
+  "device": "he-ipv6",
+  "up": true,
+  "spec": {
+    "serverIpv4": "216.218.221.42",
+    "clientIpv6": "2001:470:1f04:17b::2",
+    "linkPrefix": "2001:470:1f04:17b::/64",
+    "localIpv4": "192.168.1.20",
+    "routedPrefixes": ["2001:470:8123::/48"],
+    "mtu": 1480
+  },
+  "natted": true,
+  "publicIpv4": "203.0.113.9",
+  "endpointUpdate": { "ok": true, "code": "nochg", "ip": "203.0.113.9", "at": "2026-07-26T12:00:00.000Z" },
+  "probes": [
+    { "source": "2001:470:1f04:17b::2", "ok": true, "detail": "reached [2001:470:20::2]:53" },
+    { "source": "2001:0470:8123:6c1a:...", "ok": true, "detail": "reached [2001:470:20::2]:53" }
+  ],
+  "warnings": []
+}
+```
+
+Credentials are never echoed back; `config.credentials` reports only `configured` or `none`.
 
 ---
 
@@ -591,6 +791,8 @@ src/
 │   ├── rate-limiter.ts         # Rate limiting
 │   ├── target-resolver.ts      # IPv6 fallback ladder + edge verification
 │   ├── cdn-providers.ts        # Known anycast CDN fingerprints and seeds
+│   ├── tunnel.ts               # 6in4 tunnel bring-up, routing, verification
+│   ├── tunnelbroker.ts         # tunnelbroker.net API + endpoint updates
 │   └── audit.ts                # Audit logging
 ├── socks5/
 │   └── server.ts               # SOCKS5 protocol implementation
@@ -607,13 +809,15 @@ src/
 │       ├── traffic.ts          # Traffic stats endpoints
 │       ├── limits.ts           # Rate limit endpoints
 │       ├── audit.ts            # Audit log endpoints
-│       └── resolver.ts         # IPv6 fallback diagnostics
+│       ├── resolver.ts         # IPv6 fallback diagnostics
+│       └── tunnel.ts           # Tunnel status and control
 └── utils/
     ├── ipv6.ts                 # IPv6 address utilities
     └── logger.ts               # Pino logger
 
 test/
-└── target-resolver.test.ts     # Fallback ladder tests (node:test)
+├── target-resolver.test.ts     # Fallback ladder tests (node:test)
+└── tunnel.test.ts              # Tunnel parsing, spec resolution, ip command plans
 
 scripts/
 └── check-ipv6.sh               # Offline IPv6 reachability check
@@ -654,7 +858,9 @@ services:
     network_mode: host
 ```
 
-> **Note:** `network_mode: host` is required for IPv6 binding to work correctly in Docker. When using host networking, the port mappings are advisory and the container directly uses the host's network stack.
+> **Note:** `network_mode: host` is required for IPv6 binding to work correctly in Docker. When using host networking, the port mappings are advisory and the container directly uses the host's network stack. It also means `net.ipv6.ip_nonlocal_bind=1` must be set on the *host* — the `sysctls:` entry above cannot apply to a namespace the container does not own.
+
+To bring up a [tunnel broker](#no-ipv6-on-the-host-use-a-tunnel-broker) tunnel from inside the container, the host must also have the `sit` module loaded (`modprobe sit`). The image ships `iproute2`, since BusyBox's `ip` cannot create tunnel devices.
 
 ---
 

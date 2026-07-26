@@ -11,6 +11,7 @@
 - [功能特性](#功能特性)
 - [架构设计](#架构设计)
 - [快速开始](#快速开始)
+- [宿主机没有 IPv6？用隧道代理商](#宿主机没有-ipv6用隧道代理商)
 - [配置说明](#配置说明)
 - [SOCKS5 代理使用](#socks5-代理使用)
 - [访问无 IPv6 解析的域名](#访问无-ipv6-解析的域名)
@@ -24,6 +25,7 @@
   - [速率限制](#速率限制)
   - [审计日志](#审计日志)
   - [解析诊断](#解析诊断)
+  - [隧道管理](#隧道管理)
 - [数据模型](#数据模型)
 - [速率限制机制](#速率限制机制)
 - [开发指南](#开发指南)
@@ -35,6 +37,7 @@
 ## 功能特性
 
 - **SOCKS5 密码认证** — 完整实现 RFC 1928（SOCKS5）和 RFC 1929（用户名/密码）协议。支持 CONNECT 命令；BIND 和 UDP ASSOCIATE 请求将被拒绝。
+- **内置隧道代理商接入** — 宿主机本身没有 IPv6 也能部署：程序自行建立 6in4 隧道，并从隧道路由的前缀中分配地址。Hurricane Electric 免费提供一个 `/48`，即 2^80 个地址。详见[宿主机没有 IPv6？](#宿主机没有-ipv6用隧道代理商)。
 - **自动检测子网** — 启动时从宿主机网络接口自动检测 IPv6 子网，无需手动配置
 - **用户级 IPv6 分配** — 两种分配模式：`sticky`（同一用户+子网对复用固定 IPv6 地址）和 `random`（每次连接随机分配新地址，默认）
 - **CDN 边缘借用** — 未设置 AAAA 解析的站点，仍可通过其 CDN 的双栈边缘节点经 IPv6 访问；使用前先用证书验证。详见[访问无 IPv6 解析的域名](#访问无-ipv6-解析的域名)。
@@ -113,7 +116,8 @@
 
 ### 前置要求
 
-- 启用了 IPv6 并设置了 `net.ipv6.ip_nonlocal_bind=1` 的 Linux 系统
+- 设置了 `net.ipv6.ip_nonlocal_bind=1` 并安装了 `iproute2` 的 Linux 系统
+- IPv6 连通性 — 原生 IPv6，或[由隧道代理商提供](#宿主机没有-ipv6用隧道代理商)（后者只要求宿主机有 IPv4）
 - Node.js 20+（手动部署时需要）
 - Docker（容器部署时需要）
 
@@ -170,6 +174,128 @@ curl -X POST http://localhost:3000/api/v1/users \
 
 ---
 
+## 宿主机没有 IPv6？用隧道代理商
+
+要把连接分散到一个子网上，前提是得先有一个子网。而多数廉价 VPS 只给一个 `/128`，甚至完全不给 IPv6 —— 隧道代理商正是为此存在的。
+
+[Hurricane Electric](https://tunnelbroker.net) 免费提供一个路由的 `/48`：1,208,925,819,614,629,174,706,176 个地址，经由 6in4 隧道交付，对宿主机的全部要求只有 IPv4 和内核的 `sit` 模块。**宿主机自身完全不需要 IPv6。**
+
+隧道由本程序代为建立。在 tunnelbroker.net 上创建隧道，把凭据交给程序，剩下的它自己完成 —— 不用敲 `ip tunnel`，不用改 `/etc/network/interfaces`，也不用单独写一个 `he-ipv6.service`。
+
+### 方式 A：使用账号凭据（推荐）
+
+在 [tunnelbroker.net](https://tunnelbroker.net) 注册并创建 Regular Tunnel，在隧道页面点击 **Assign /48**，然后：
+
+```bash
+export HE_TUNNEL_ID=1033580          # 隧道页面的 "Tunnel ID"
+export HE_TUNNEL_USERNAME=your-account
+export HE_TUNNEL_PASSWORD=your-password
+```
+
+启动时，程序会通过 [tunnelbroker API](https://forums.he.net/index.php?topic=3153.0) 读取隧道的端点与路由前缀，把隧道指向本机当前的公网 IPv4，建立 `sit` 设备，并将路由前缀注册为可分配子网。日志会完整反映这一过程：
+
+```
+info: Fetched tunnel details from tunnelbroker.net { tunnelId: "1033580", routed48: "2001:470:ecf2::/48" }
+info: Tunnel endpoint set to 203.0.113.9
+info: 6in4 tunnel is up { device: "he-ipv6", routed: ["2001:470:ecf2::/48"], mtu: 1480 }
+info: Tunnel verified: reached [2001:470:20::2]:53
+info: Registered tunnel-routed IPv6 subnet { cidr: "2001:470:ecf2::/48" }
+```
+
+> 如果隧道设置了 **Update Key**（隧道页面的 *Advanced* 标签），HE 要求用该密钥而非账号密码：填入 `HE_TUNNEL_UPDATE_KEY`。部署它更安全 —— 它只能控制这一条隧道。
+
+### 方式 B：直接填写隧道参数
+
+不想把账号密码放到服务器上。从隧道页面抄四个值：
+
+| 隧道页面字段 | 环境变量 |
+|---|---|
+| Server IPv4 Address | `HE_TUNNEL_SERVER_IPV4` |
+| Client IPv6 Address | `HE_TUNNEL_CLIENT_IPV6` |
+| Routed /48（和/或 Routed /64） | `HE_TUNNEL_ROUTED_PREFIXES` |
+| Server IPv6 Address _（可选）_ | `HE_TUNNEL_SERVER_IPV6` |
+
+```bash
+export HE_TUNNEL_SERVER_IPV4=216.218.221.42
+export HE_TUNNEL_CLIENT_IPV6=2001:470:1f04:17b::2/64
+export HE_TUNNEL_ROUTED_PREFIXES=2001:470:8123::/48,2001:470:1f05:17b::/64
+```
+
+这些参数描述的是标准的 RFC 4213 6in4 隧道，所以方式 B 适用于任何隧道代理商，不限于 HE。只有 API 读取和端点更新这两项功能是 HE 专有的。
+
+两种方式同时配置时，以环境变量为准 —— 适合只覆盖其中某一项而仍然使用 API。
+
+### Docker 部署
+
+```yaml
+services:
+  ipv6-proxy:
+    image: ghcr.io/<your-username>/ipv6-subnet-proxy:latest
+    environment:
+      - API_KEY=changeme
+      - HE_TUNNEL_ID=1033580
+      - HE_TUNNEL_USERNAME=your-account
+      - HE_TUNNEL_UPDATE_KEY=your-update-key
+    volumes:
+      - ./data:/data
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+    network_mode: host
+```
+
+宿主机侧有两项前置条件，因为这里涉及的内核状态并不随容器隔离：
+
+```bash
+# 1. 6in4 内核模块。容器无法自行加载宿主机的模块。
+sudo modprobe sit
+echo sit | sudo tee /etc/modules-load.d/sit.conf
+
+# 2. 允许绑定未配置在网卡上的地址。
+sudo sysctl -w net.ipv6.ip_nonlocal_bind=1
+echo net.ipv6.ip_nonlocal_bind=1 | sudo tee /etc/sysctl.d/99-ipv6-proxy.conf
+```
+
+`network_mode: host` 和 `cap_add: NET_ADMIN` 二者缺一不可：隧道建立在宿主机的网络命名空间中。
+
+### 程序具体做了什么
+
+| 步骤 | 作用 |
+|---|---|
+| 建立指向代理商 IPv4 端点的 `sit` 设备 | 把 IPv6 封装进 IPv4 报文（协议号 41） |
+| 在隧道链路上配置客户端地址 | 点对点链路的本端地址 |
+| 为每个路由前缀添加策略规则和独立路由表 | **源地址属于**隧道前缀的流量才走隧道 |
+| 为每个路由前缀添加 `local` 路由 | 使 `/48` 内的任意地址无需预先配置即可响应 |
+| 在主路由表中添加默认路由 | 仅当宿主机自身没有默认路由时 —— 见 `HE_TUNNEL_DEFAULT_ROUTE` |
+
+采用基于源地址的策略路由，是为了让**已有原生 IPv6 的机器**也能安全启用此功能：宿主机自身的流量继续走原生链路，只有来自隧道前缀的地址才走隧道。建立过程是幂等的 —— 它会先拆除自己的设备再重建，因此重启和崩溃都不会留下需要手动清理的残留。
+
+### 动态公网 IP
+
+6in4 隧道只在代理商记录的 *Client IPv4* 与本机实际公网地址一致时才通流量。配置了凭据后，程序每 15 分钟（`HE_TUNNEL_UPDATE_INTERVAL_MS`）复查一次公网 IPv4，发生变化时自动更新隧道并重建设备。家庭宽带和重装的 VPS 都能自行恢复。
+
+### NAT 环境
+
+隧道依然可用：把隧道锚定到内网地址，并在路由器上把 IP 协议 41 转发到本机（是协议 41 本身，不是某个 TCP/UDP 端口）。
+
+```bash
+export HE_TUNNEL_LOCAL_IPV4=192.168.1.20
+```
+
+不设置时程序会自行探测，并在日志中警告它选用了哪个地址。
+
+### 状态检查
+
+```bash
+curl -s http://localhost:3000/api/v1/tunnel -H "X-API-Key: $API_KEY" | jq
+```
+
+`up` 表示设备是否建立成功，`probes` 表示是否真的有流量通过隧道，`warnings` 汇总所有降级项 —— 缺失的 sysctl、被拒绝的凭据、不支持策略路由的内核等。`POST /api/v1/tunnel/reconnect` 可重建隧道，`POST /api/v1/tunnel/verify` 可重新探测。
+
+如果 `up` 为 true 但所有探测都失败，说明设备在本地建好了，而报文在中途被丢弃。按可能性排序：代理商记录的 Client IPv4 与本机不符、协议 41 被服务商或前置 NAT 过滤、`sit` 模块未加载。
+
+---
+
 ## 配置说明
 
 所有配置通过环境变量进行设置：
@@ -185,6 +311,40 @@ curl -X POST http://localhost:3000/api/v1/users \
 | `DEFAULT_SUBNET_GATEWAY` | — | 默认子网的网关地址 |
 | `BCRYPT_ROUNDS` | `10` | 密码哈希的 bcrypt 轮次 |
 | `LOG_LEVEL` | `info` | 日志级别：`trace`、`debug`、`info`、`warn`、`error`、`fatal` |
+
+### 隧道代理商（6in4）
+
+在没有 IPv6 的宿主机上接入隧道前缀，详见[宿主机没有 IPv6？](#宿主机没有-ipv6用隧道代理商)。只要配置了账号凭据或手动端点参数，隧道功能即自动启用。
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `HE_TUNNEL_ENABLED` | _(自动)_ | 配置了凭据或手动端点参数时自动开启。设为 `false` 可保留配置但不启用 |
+| `HE_TUNNEL_ID` | — | tunnelbroker.net 隧道页面的 Tunnel ID |
+| `HE_TUNNEL_USERNAME` | — | tunnelbroker.net 账号名 |
+| `HE_TUNNEL_PASSWORD` | — | 账号密码。隧道设置了 Update Key 时不使用此项 |
+| `HE_TUNNEL_UPDATE_KEY` | — | 隧道级 Update Key（隧道 → *Advanced*）。设置后必须用它替代密码，且部署更安全 |
+| `HE_TUNNEL_SERVER_IPV4` | _(取自 API)_ | 代理商侧 IPv4 端点 —— "Server IPv4 Address" |
+| `HE_TUNNEL_SERVER_IPV6` | _(取自 API)_ | 代理商侧 IPv6 地址 —— "Server IPv6 Address" |
+| `HE_TUNNEL_CLIENT_IPV6` | _(取自 API)_ | 本机在隧道链路上的地址，如 `2001:470:1f04:17b::2/64` |
+| `HE_TUNNEL_ROUTED_PREFIXES` | _(取自 API)_ | 逗号分隔的隧道路由前缀，这些前缀将成为可分配子网 |
+| `HE_TUNNEL_LOCAL_IPV4` | _(自动探测)_ | 隧道锚定的本地 IPv4。NAT 环境下填内网地址 |
+| `HE_TUNNEL_DEVICE` | `he-ipv6` | 创建的 `sit` 设备名 |
+| `HE_TUNNEL_MTU` | `1480` | 隧道 MTU。1480 是 6in4 在 1500 字节路径上的余量 |
+| `HE_TUNNEL_TTL` | `255` | 外层 IPv4 报文的 TTL |
+| `HE_TUNNEL_ROUTE_TABLE` | `1470` | 隧道流量使用的路由表号，同时用作规则优先级 |
+| `HE_TUNNEL_DEFAULT_ROUTE` | `auto` | `auto` 仅在宿主机没有默认路由时添加；`always` 总是添加；`never` 不改动主路由表 |
+| `HE_TUNNEL_FORWARDING` | `false` | 开启 `net.ipv6.conf.all.forwarding`。仅在需要把前缀转发给其他主机时使用 |
+| `HE_TUNNEL_REGISTER_SUBNETS` | `true` | 启动时把路由前缀注册为可分配子网 |
+| `HE_TUNNEL_UPDATE_ENDPOINT` | _(有凭据时开启)_ | 启动时把隧道指向本机公网 IPv4 |
+| `HE_TUNNEL_UPDATE_INTERVAL_MS` | `900000` | 公网 IPv4 复查间隔，变化时自动更新。`0` 为关闭，最小值限制为 60 秒 |
+| `HE_TUNNEL_VERIFY` | `true` | 建立完成后探测隧道并报告结果 |
+| `HE_TUNNEL_VERIFY_HOST` | `2001:470:20::2` | 探测目标（HE 的 anycast DNS，支持 TCP 查询） |
+| `HE_TUNNEL_VERIFY_PORT` | `53` | 探测端口 |
+| `HE_TUNNEL_TEARDOWN_ON_EXIT` | `true` | 退出时移除设备、路由和规则 |
+| `HE_TUNNEL_PUBLIC_IPV4_URL` | `https://checkip.amazonaws.com` | 查询本机公网 IPv4 的地址 |
+| `HE_TUNNEL_API_URL` | `https://tunnelbroker.net/tunnelInfo.php` | 隧道信息 API |
+| `HE_TUNNEL_UPDATE_URL` | `https://ipv4.tunnelbroker.net/nic/update` | 端点更新 API（dyndns 协议） |
+| `HE_TUNNEL_REQUEST_TIMEOUT_MS` | `10000` | 上述 API 调用的超时时间 |
 
 ### IPv6 回退配置
 
@@ -423,6 +583,7 @@ www.akamai.com        YES     YES     -          YES     native=2600:1413:5000:3
 - `binding.created`、`binding.deleted`
 - `ip.refreshed`
 - `rate_limits.updated`
+- `tunnel.endpoint_updated`、`tunnel.reconnected`
 
 ### 解析诊断
 
@@ -458,6 +619,45 @@ IPv6 回退链的诊断接口，详见[访问无 IPv6 解析的域名](#访问�
 ```
 
 当不存在任何 IPv6 路径时，`route` 为 `null`，`error` 给出原因。
+
+### 隧道管理
+
+6in4 隧道的状态与控制接口，详见[宿主机没有 IPv6？](#宿主机没有-ipv6用隧道代理商)。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/v1/tunnel` | 隧道状态：设备、参数、探测结果、告警 |
+| `POST` | `/api/v1/tunnel/verify` | 重新探测隧道是否通流量 |
+| `POST` | `/api/v1/tunnel/endpoint` | 把隧道指向本机当前公网 IPv4 |
+| `POST` | `/api/v1/tunnel/reconnect` | 按当前配置重建隧道 |
+
+**GET /api/v1/tunnel**
+
+```json
+{
+  "enabled": true,
+  "device": "he-ipv6",
+  "up": true,
+  "spec": {
+    "serverIpv4": "216.218.221.42",
+    "clientIpv6": "2001:470:1f04:17b::2",
+    "linkPrefix": "2001:470:1f04:17b::/64",
+    "localIpv4": "192.168.1.20",
+    "routedPrefixes": ["2001:470:8123::/48"],
+    "mtu": 1480
+  },
+  "natted": true,
+  "publicIpv4": "203.0.113.9",
+  "endpointUpdate": { "ok": true, "code": "nochg", "ip": "203.0.113.9", "at": "2026-07-26T12:00:00.000Z" },
+  "probes": [
+    { "source": "2001:470:1f04:17b::2", "ok": true, "detail": "reached [2001:470:20::2]:53" },
+    { "source": "2001:0470:8123:6c1a:...", "ok": true, "detail": "reached [2001:470:20::2]:53" }
+  ],
+  "warnings": []
+}
+```
+
+响应中不会回显任何凭据，`config.credentials` 只返回 `configured` 或 `none`。
 
 ---
 
@@ -575,6 +775,8 @@ src/
 │   ├── rate-limiter.ts         # 速率限制
 │   ├── target-resolver.ts      # IPv6 回退链与边缘节点验证
 │   ├── cdn-providers.ts        # 已知 anycast CDN 特征与种子域名
+│   ├── tunnel.ts               # 6in4 隧道建立、路由与验证
+│   ├── tunnelbroker.ts         # tunnelbroker.net API 与端点更新
 │   └── audit.ts                # 审计日志
 ├── socks5/
 │   └── server.ts               # SOCKS5 协议实现
@@ -591,13 +793,15 @@ src/
 │       ├── traffic.ts          # 流量统计端点
 │       ├── limits.ts           # 速率限制端点
 │       ├── audit.ts            # 审计日志端点
-│       └── resolver.ts         # IPv6 回退诊断端点
+│       ├── resolver.ts         # IPv6 回退诊断端点
+│       └── tunnel.ts           # 隧道状态与控制端点
 └── utils/
     ├── ipv6.ts                 # IPv6 地址工具
     └── logger.ts               # Pino 日志器
 
 test/
-└── target-resolver.test.ts     # 回退链测试（node:test）
+├── target-resolver.test.ts     # 回退链测试（node:test）
+└── tunnel.test.ts              # 隧道解析、参数合并与 ip 命令编排测试
 
 scripts/
 └── check-ipv6.sh               # 独立的 IPv6 可达性检测脚本
@@ -638,7 +842,9 @@ services:
     network_mode: host
 ```
 
-> **注意：** 在 Docker 中，IPv6 绑定需要 `network_mode: host` 才能正常工作。使用主机网络模式时，端口映射仅起说明作用，容器将直接使用主机的网络栈。
+> **注意：** 在 Docker 中，IPv6 绑定需要 `network_mode: host` 才能正常工作。使用主机网络模式时，端口映射仅起说明作用，容器将直接使用主机的网络栈。这也意味着 `net.ipv6.ip_nonlocal_bind=1` 必须设置在*宿主机*上 —— 上面的 `sysctls:` 无法作用于容器并不拥有的命名空间。
+
+若要在容器内建立[隧道代理商](#宿主机没有-ipv6用隧道代理商)隧道，宿主机还需加载 `sit` 模块（`modprobe sit`）。镜像已内置 `iproute2`，因为 BusyBox 的 `ip` 无法创建隧道设备。
 
 ---
 
