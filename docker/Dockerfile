@@ -4,7 +4,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY src/ ./src/
-RUN npm run build
+RUN npm run build && npm prune --omit=dev
 
 FROM node:20-alpine
 # iproute2: BusyBox's `ip` cannot create sit devices or add `local` routes,
