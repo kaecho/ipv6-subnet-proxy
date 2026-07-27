@@ -60,7 +60,8 @@ services:
     cap_add:
       - NET_ADMIN
       # - SYS_MODULE
-    sysctls:
-      - net.ipv6.ip_nonlocal_bind=1
+    # network_mode: host means compose sysctls: are ignored — set on the HOST:
+    #   sysctl -w net.ipv6.ip_nonlocal_bind=1
+    #   echo net.ipv6.ip_nonlocal_bind=1 | tee /etc/sysctl.d/99-ipv6-proxy.conf
     restart: unless-stopped
     network_mode: host

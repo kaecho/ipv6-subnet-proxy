@@ -1,9 +1,25 @@
 #!/bin/sh
 set -e
 
-if [ -w /proc/sys/net/ipv6/ip_nonlocal_bind ]; then
-  echo 1 > /proc/sys/net/ipv6/ip_nonlocal_bind
-  echo "Enabled net.ipv6.ip_nonlocal_bind"
+# Host-network containers share the host's /proc/sys, but it is often mounted
+# read-only inside the container. [ -w ] can still report true, so never let a
+# failed write abort startup under set -e — set the sysctl on the HOST instead:
+#   sysctl -w net.ipv6.ip_nonlocal_bind=1
+#   echo net.ipv6.ip_nonlocal_bind=1 | tee /etc/sysctl.d/99-ipv6-proxy.conf
+if [ -f /proc/sys/net/ipv6/ip_nonlocal_bind ]; then
+  current=$(cat /proc/sys/net/ipv6/ip_nonlocal_bind 2>/dev/null || true)
+  if [ "$current" != "1" ]; then
+    # Subshell swallows the shell's "can't create … Read-only file system" noise.
+    # Must stay inside `if` so a failed write never trips set -e.
+    if (echo 1 > /proc/sys/net/ipv6/ip_nonlocal_bind) 2>/dev/null; then
+      echo "Enabled net.ipv6.ip_nonlocal_bind"
+    else
+      echo "warning: could not set net.ipv6.ip_nonlocal_bind=1 (read-only /proc)."
+      echo "         Set it on the HOST before starting the container:"
+      echo "           sysctl -w net.ipv6.ip_nonlocal_bind=1"
+      echo "           echo net.ipv6.ip_nonlocal_bind=1 | tee /etc/sysctl.d/99-ipv6-proxy.conf"
+    fi
+  fi
 fi
 
 # A 6in4 tunnel needs the kernel's sit module. Modules live in the host kernel,
