@@ -1,10 +1,10 @@
 # IPv6 Subnet Proxy
 
-[English](https://emptysuns.github.io/ipv6-subnet-proxy/) | [中文](https://emptysuns.github.io/ipv6-subnet-proxy/zh/)
+[English](https://kaecho.github.io/ipv6-subnet-proxy/) | [中文](https://kaecho.github.io/ipv6-subnet-proxy/zh/)
 
 SOCKS5 proxy that spreads outbound connections across IPv6 addresses from managed subnets. Built-in free IPv6 via **Cloudflare WARP** (no signup) or a **6in4 tunnel broker**, plus a REST management API, SQLite persistence, per-user rate limits, traffic stats, and audit logs.
 
-**Full docs (EN / 中文):** https://emptysuns.github.io/ipv6-subnet-proxy/
+**Full docs (EN / 中文):** https://kaecho.github.io/ipv6-subnet-proxy/
 
 ---
 
@@ -19,7 +19,7 @@ echo net.ipv6.ip_nonlocal_bind=1 | sudo tee /etc/sysctl.d/99-ipv6-proxy.conf
 #   sudo modprobe wireguard   # for WARP
 #   sudo modprobe sit         # for a 6in4 tunnel broker
 
-git clone https://github.com/emptysuns/ipv6-subnet-proxy.git
+git clone https://github.com/kaecho/ipv6-subnet-proxy.git
 cd ipv6-subnet-proxy
 
 # Edit docker/docker-compose.yml → set API_KEY (and WARP_ENABLED / HE_* if needed)
@@ -48,7 +48,7 @@ SOCKS5: `localhost:1080`, user `alice` / `secret123`.
 | Kernel | `modprobe wireguard` | `modprobe sit` |
 | Env | `WARP_ENABLED=true` | `HE_TUNNEL_ID` + credentials |
 
-Details: [docs → No IPv6](https://emptysuns.github.io/ipv6-subnet-proxy/no-ipv6)
+Details: [docs → No IPv6](https://kaecho.github.io/ipv6-subnet-proxy/no-ipv6)
 
 ## Manual install
 
@@ -78,7 +78,7 @@ All config is environment variables. Common ones:
 | `HE_TUNNEL_UPDATE_KEY` | — | Per-tunnel update key (preferred over password) |
 | `LOG_LEVEL` | `info` | `trace`…`fatal` |
 
-Full list: [docs → Configuration](https://emptysuns.github.io/ipv6-subnet-proxy/configuration)
+Full list: [docs → Configuration](https://kaecho.github.io/ipv6-subnet-proxy/configuration)
 
 ## Docs & development
 
@@ -89,7 +89,7 @@ npm test
 npm run build
 ```
 
-Image: `ghcr.io/emptysuns/ipv6-subnet-proxy` (tag `v*`).
+Image: `ghcr.io/kaecho/ipv6-subnet-proxy` (tag `v*`).
 
 ## License
 

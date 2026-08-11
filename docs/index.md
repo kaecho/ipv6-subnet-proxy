@@ -11,7 +11,7 @@ hero:
       link: /getting-started
     - theme: alt
       text: GitHub
-      link: https://github.com/emptysuns/ipv6-subnet-proxy
+      link: https://github.com/kaecho/ipv6-subnet-proxy
     - theme: alt
       text: 中文
       link: /zh/

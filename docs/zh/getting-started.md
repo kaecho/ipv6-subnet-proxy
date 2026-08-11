@@ -14,7 +14,7 @@
 sudo sysctl -w net.ipv6.ip_nonlocal_bind=1
 echo net.ipv6.ip_nonlocal_bind=1 | sudo tee /etc/sysctl.d/99-ipv6-proxy.conf
 
-git clone https://github.com/emptysuns/ipv6-subnet-proxy.git
+git clone https://github.com/kaecho/ipv6-subnet-proxy.git
 cd ipv6-subnet-proxy
 
 # 编辑 docker/docker-compose.yml → API_KEY（以及 WARP_ENABLED / HE_*）
@@ -25,7 +25,7 @@ docker compose -f docker/docker-compose.yml up -d --build
 
 ```bash
 # 克隆并安装
-git clone https://github.com/emptysuns/ipv6-subnet-proxy.git
+git clone https://github.com/kaecho/ipv6-subnet-proxy.git
 cd ipv6-subnet-proxy
 npm install
 npm run build

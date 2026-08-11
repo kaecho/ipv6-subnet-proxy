@@ -18,7 +18,7 @@
 import https from 'https';
 import { TunnelConfig } from '../config';
 
-const USER_AGENT = 'ipv6-subnet-proxy/1.5 (+https://github.com/emptysuns/ipv6-subnet-proxy)';
+const USER_AGENT = 'ipv6-subnet-proxy/1.5 (+https://github.com/kaecho/ipv6-subnet-proxy)';
 const MAX_BODY_BYTES = 512 * 1024;
 
 export interface TunnelInfo {

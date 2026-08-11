@@ -1,10 +1,10 @@
 # IPv6 子网代理
 
-[English](https://emptysuns.github.io/ipv6-subnet-proxy/) | [中文](https://emptysuns.github.io/ipv6-subnet-proxy/zh/)
+[English](https://kaecho.github.io/ipv6-subnet-proxy/) | [中文](https://kaecho.github.io/ipv6-subnet-proxy/zh/)
 
 将出站连接分散到托管子网中不同 IPv6 地址的 SOCKS5 代理。内置免费 IPv6 接入：**Cloudflare WARP**（免注册）或 **6in4 隧道代理商**；附带 REST 管理 API、SQLite 持久化、用户级限速、流量统计与审计日志。
 
-**完整文档（中 / EN）：** https://emptysuns.github.io/ipv6-subnet-proxy/zh/
+**完整文档（中 / EN）：** https://kaecho.github.io/ipv6-subnet-proxy/zh/
 
 ---
 
@@ -19,7 +19,7 @@ echo net.ipv6.ip_nonlocal_bind=1 | sudo tee /etc/sysctl.d/99-ipv6-proxy.conf
 #   sudo modprobe wireguard   # WARP
 #   sudo modprobe sit         # 6in4 隧道
 
-git clone https://github.com/emptysuns/ipv6-subnet-proxy.git
+git clone https://github.com/kaecho/ipv6-subnet-proxy.git
 cd ipv6-subnet-proxy
 
 # 编辑 docker/docker-compose.yml → 设置 API_KEY（以及 WARP_ENABLED / HE_*）
@@ -48,7 +48,7 @@ SOCKS5：`localhost:1080`，用户 `alice` / `secret123`。
 | 内核 | `modprobe wireguard` | `modprobe sit` |
 | 环境变量 | `WARP_ENABLED=true` | `HE_TUNNEL_ID` + 凭据 |
 
-详见：[文档 → 宿主机没有 IPv6](https://emptysuns.github.io/ipv6-subnet-proxy/zh/no-ipv6)
+详见：[文档 → 宿主机没有 IPv6](https://kaecho.github.io/ipv6-subnet-proxy/zh/no-ipv6)
 
 ## 手动安装
 
@@ -78,7 +78,7 @@ npm start
 | `HE_TUNNEL_UPDATE_KEY` | — | 单隧道 Update Key（优于密码） |
 | `LOG_LEVEL` | `info` | `trace`…`fatal` |
 
-完整列表：[文档 → 配置说明](https://emptysuns.github.io/ipv6-subnet-proxy/zh/configuration)
+完整列表：[文档 → 配置说明](https://kaecho.github.io/ipv6-subnet-proxy/zh/configuration)
 
 ## 文档与开发
 
@@ -89,7 +89,7 @@ npm test
 npm run build
 ```
 
-镜像：`ghcr.io/emptysuns/ipv6-subnet-proxy`（推送 `v*` tag 发布）。
+镜像：`ghcr.io/kaecho/ipv6-subnet-proxy`（推送 `v*` tag 发布）。
 
 ## 许可证
 

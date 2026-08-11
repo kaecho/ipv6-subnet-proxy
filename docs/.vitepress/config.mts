@@ -3,13 +3,13 @@ import { defineConfig } from 'vitepress'
 const enNav = [
   { text: 'Guide', link: '/getting-started' },
   { text: 'API', link: '/api' },
-  { text: 'GitHub', link: 'https://github.com/emptysuns/ipv6-subnet-proxy' },
+  { text: 'GitHub', link: 'https://github.com/kaecho/ipv6-subnet-proxy' },
 ]
 
 const zhNav = [
   { text: '指南', link: '/zh/getting-started' },
   { text: 'API', link: '/zh/api' },
-  { text: 'GitHub', link: 'https://github.com/emptysuns/ipv6-subnet-proxy' },
+  { text: 'GitHub', link: 'https://github.com/kaecho/ipv6-subnet-proxy' },
 ]
 
 const enSidebar = [
@@ -67,7 +67,7 @@ const zhSidebar = [
 export default defineConfig({
   title: 'IPv6 Subnet Proxy',
   description: 'SOCKS5 proxy that distributes connections across an IPv6 subnet',
-  // GitHub Pages project site: https://emptysuns.github.io/ipv6-subnet-proxy/
+  // GitHub Pages project site: https://kaecho.github.io/ipv6-subnet-proxy/
   base: '/ipv6-subnet-proxy/',
   cleanUrls: true,
   lastUpdated: true,
@@ -82,10 +82,10 @@ export default defineConfig({
         nav: enNav,
         sidebar: enSidebar,
         socialLinks: [
-          { icon: 'github', link: 'https://github.com/emptysuns/ipv6-subnet-proxy' },
+          { icon: 'github', link: 'https://github.com/kaecho/ipv6-subnet-proxy' },
         ],
         editLink: {
-          pattern: 'https://github.com/emptysuns/ipv6-subnet-proxy/edit/master/docs/:path',
+          pattern: 'https://github.com/kaecho/ipv6-subnet-proxy/edit/master/docs/:path',
           text: 'Edit this page on GitHub',
         },
         footer: {
@@ -104,10 +104,10 @@ export default defineConfig({
         nav: zhNav,
         sidebar: zhSidebar,
         socialLinks: [
-          { icon: 'github', link: 'https://github.com/emptysuns/ipv6-subnet-proxy' },
+          { icon: 'github', link: 'https://github.com/kaecho/ipv6-subnet-proxy' },
         ],
         editLink: {
-          pattern: 'https://github.com/emptysuns/ipv6-subnet-proxy/edit/master/docs/:path',
+          pattern: 'https://github.com/kaecho/ipv6-subnet-proxy/edit/master/docs/:path',
           text: '在 GitHub 上编辑此页',
         },
         footer: {

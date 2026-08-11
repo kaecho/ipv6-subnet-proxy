@@ -8,3 +8,4 @@ dist/
 data/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+.claude/
