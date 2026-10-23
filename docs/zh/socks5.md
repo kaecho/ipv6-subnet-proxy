@@ -28,4 +28,10 @@ sysctl -w net.ipv6.ip_nonlocal_bind=1
 
 若要永久生效，请将 `net.ipv6.ip_nonlocal_bind=1` 添加到 `/etc/sysctl.conf` 或 `/etc/sysctl.d/99-ipv6.conf`。
 
+当内核已有覆盖整个前缀的 `local` 路由（内置 6in4 隧道会自动添加）时，代理不再为每条会话单独执行 `ip addr add`；`ip_nonlocal_bind=1` 已足够绑定该地址。依赖 NDP 的原生子网（桥接或 LXC 场景）仍会逐地址注册。
+
+### 握手超时
+
+客户端必须在 30 秒内完成 SOCKS5 方法协商、认证和 CONNECT 请求。静默连接会被关闭，避免长期占用连接槽位。已进入转发的空闲连接不受此超时限制。
+
 ---

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcrypt';
 import { getDb } from '../database/connection';
@@ -24,6 +25,38 @@ export interface UpdateUserInput {
   password?: string;
   mode?: 'sticky' | 'random';
   status?: 'active' | 'disabled';
+}
+
+/**
+ * bcrypt takes 60-100 ms by design, and every SOCKS5 connection performs an
+ * authentication. Cache the successful result so a burst of connections from
+ * one client costs a single comparison; a password or status change clears
+ * the whole cache.
+ */
+const AUTH_CACHE_TTL_MS = 60_000;
+const AUTH_CACHE_MAX_ENTRIES = 1024;
+
+interface AuthCacheEntry {
+  user: User;
+  expiresAt: number;
+}
+
+const authCache = new Map<string, AuthCacheEntry>();
+
+/** Key by username + password, never the plaintext password itself. */
+function authCacheKey(username: string, password: string): string {
+  return crypto.createHash('sha256').update(username).update('\0').update(password).digest('hex');
+}
+
+function pruneAuthCache(now: number): void {
+  for (const [key, entry] of authCache) {
+    if (entry.expiresAt <= now) authCache.delete(key);
+  }
+  while (authCache.size >= AUTH_CACHE_MAX_ENTRIES) {
+    const oldest = authCache.keys().next();
+    if (oldest.done) return;
+    authCache.delete(oldest.value);
+  }
 }
 
 function rowToUser(row: any): User {
@@ -66,16 +99,28 @@ export function createUser(input: CreateUserInput): User {
   return { id, username: input.username, mode, status: 'active', created_at: now, updated_at: now };
 }
 
-export function verifyCredentials(username: string, password: string): User | null {
+export async function verifyCredentials(username: string, password: string): Promise<User | null> {
+  const key = authCacheKey(username, password);
+  const now = Date.now();
+  const cached = authCache.get(key);
+  if (cached) {
+    if (cached.expiresAt > now) return cached.user;
+    authCache.delete(key);
+  }
+
   const db = getDb();
   const row = db.prepare(
     'SELECT id, username, password, mode, status, created_at, updated_at FROM users WHERE username = ?'
   ).get(username) as any;
 
   if (!row || row.status === 'disabled') return null;
-  if (!bcrypt.compareSync(password, row.password)) return null;
+  // Async compare keeps the event loop free while bcrypt works in libuv.
+  if (!(await bcrypt.compare(password, row.password))) return null;
 
-  return rowToUser(row);
+  const user = rowToUser(row);
+  pruneAuthCache(now);
+  authCache.set(key, { user, expiresAt: now + AUTH_CACHE_TTL_MS });
+  return user;
 }
 
 export function getUser(id: string): User | null {
@@ -100,6 +145,10 @@ export function updateUser(id: string, input: UpdateUserInput): User {
 
   const user = getUser(id);
   if (!user) throw new Error(`User ${id} not found`);
+
+  // Password, mode and status all feed the authenticated identity; a cached
+  // success must not outlive any of them.
+  authCache.clear();
 
   if (input.password !== undefined) {
     const config = loadConfig();
@@ -142,5 +191,6 @@ export function deleteUser(id: string): void {
   log.info({ userId: id, disconnectedSessions: sessions.length }, 'Disconnected active sessions for deleted user');
 
   db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  authCache.clear();
   log.info({ userId: id }, 'User deleted');
 }

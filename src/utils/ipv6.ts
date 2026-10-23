@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import fs from 'fs';
 import net from 'net';
 import os from 'os';
 import { execFileSync } from 'child_process';
@@ -319,9 +320,14 @@ function networkAddressFromCIDR(address: string, prefixLen: number): string {
 // --- Interface address binding for LXC / non-Docker deployments ---
 
 let _outboundInterface: string | null = null;
-const _registeredAddrs = new Map<string, { refs: number; iface: string }>();
+const _registeredAddrs = new Map<string, { refs: number; iface: string; configured: boolean }>();
 /** Prefixes that live on a specific device — the 6in4 tunnel's, and each WARP link's. */
 const _prefixInterfaces: { cidr: string; iface: string }[] = [];
+/**
+ * Per-prefix answer to "does the kernel deliver packets for the whole prefix
+ * locally?" Cached because the answer only changes when routes change.
+ */
+const _localRoutePrefixes = new Map<string, boolean>();
 /**
  * Addresses that belong to their device for as long as it exists, rather than
  * being borrowed per session. A WARP interface's single /128 *is* the
@@ -358,6 +364,7 @@ export function clearPinnedIPv6Addresses(): void {
  */
 export function registerInterfaceForPrefix(cidr: string, iface: string): void {
   const normalized = normalizeCIDR(cidr);
+  _localRoutePrefixes.delete(normalized);
   const existing = _prefixInterfaces.find((p) => p.cidr === normalized);
   if (existing) {
     existing.iface = iface;
@@ -370,10 +377,11 @@ export function clearPrefixInterfaces(iface?: string): void {
   const keep = iface ? _prefixInterfaces.filter((p) => p.iface !== iface) : [];
   _prefixInterfaces.length = 0;
   _prefixInterfaces.push(...keep);
+  _localRoutePrefixes.clear();
 }
 
-/** The device an address should be configured on: its pinned prefix, else the default one. */
-export function interfaceForAddress(addr: string): string {
+/** Longest prefix registered for the address, if any. */
+function prefixEntryForAddress(addr: string): { cidr: string; iface: string } | null {
   let best: { cidr: string; iface: string } | null = null;
   for (const entry of _prefixInterfaces) {
     if (!isAddressInCIDR(addr, entry.cidr)) continue;
@@ -381,7 +389,30 @@ export function interfaceForAddress(addr: string): string {
       best = entry;
     }
   }
-  return best ? best.iface : getOutboundInterface();
+  return best;
+}
+
+/**
+ * True when the kernel has a `local` route covering the whole prefix, so
+ * packets for any address in it are delivered without a per-address entry.
+ * The tunnel setup installs this route; `ip_nonlocal_bind` then covers bind.
+ */
+function hasLocalRoute(prefix: string): boolean {
+  const cached = _localRoutePrefixes.get(prefix);
+  if (cached !== undefined) return cached;
+  let routed = false;
+  try {
+    routed = execFileSync('ip', ['-6', 'route', 'show', 'local', prefix], {
+      encoding: 'utf-8', timeout: 3000,
+    }).trim().length > 0;
+  } catch {}
+  _localRoutePrefixes.set(prefix, routed);
+  return routed;
+}
+
+/** The device an address should be configured on: its pinned prefix, else the default one. */
+export function interfaceForAddress(addr: string): string {
+  return prefixEntryForAddress(addr)?.iface ?? getOutboundInterface();
 }
 
 /** Drop the cached outbound interface — call after the routing table changes. */
@@ -431,6 +462,31 @@ export function getOutboundInterface(): string {
   return 'eth0'; // last-resort fallback
 }
 
+const NONLOCAL_BIND_PATH = '/proc/sys/net/ipv6/ip_nonlocal_bind';
+
+function isNonlocalBindEnabled(): boolean {
+  try {
+    return fs.readFileSync(NONLOCAL_BIND_PATH, 'utf-8').trim() === '1';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Allow sockets to bind addresses that are not configured on any interface.
+ * Best effort: /proc is read-only in some container setups, which then have
+ * to set the sysctl on the host.
+ */
+export function ensureNonlocalBind(): boolean {
+  if (isNonlocalBindEnabled()) return true;
+  try {
+    fs.writeFileSync(NONLOCAL_BIND_PATH, '1');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Register an IPv6 address on the outbound interface so the upstream
  * router responds to NDP (Neighbor Discovery) queries for this address.
@@ -452,6 +508,19 @@ export function registerIPv6Address(addr: string): void {
     return;
   }
 
+  // A routed prefix is already accepted as a whole by its `local` route, and
+  // ip_nonlocal_bind=1 lets the socket source from any address in it. Adding
+  // one /128 per session would only churn the tunnel device.
+  if (isNonlocalBindEnabled()) {
+    const prefix = prefixEntryForAddress(addr);
+    if (prefix && hasLocalRoute(prefix.cidr)) {
+      // Track it anyway so refcounts and force-removal know this process
+      // never configured the address.
+      _registeredAddrs.set(addr, { refs: 1, iface: prefix.iface, configured: false });
+      return;
+    }
+  }
+
   const iface = interfaceForAddress(addr);
   try {
     execFileSync('ip', ['-6', 'addr', 'add', `${addr}/128`, 'dev', iface], {
@@ -463,7 +532,7 @@ export function registerIPv6Address(addr: string): void {
   }
   // Remember where it was put: the tunnel may be torn down and re-detected
   // before this address is released.
-  _registeredAddrs.set(addr, { refs: 1, iface });
+  _registeredAddrs.set(addr, { refs: 1, iface, configured: true });
 }
 
 /**
@@ -480,7 +549,7 @@ export function unregisterIPv6Address(addr: string): void {
     return;
   }
 
-  removeAddressFromInterface(addr, entry.iface);
+  if (entry.configured) removeAddressFromInterface(addr, entry.iface);
   _registeredAddrs.delete(addr);
 }
 
@@ -489,8 +558,12 @@ export function unregisterIPv6Address(addr: string): void {
  */
 export function forceUnregisterIPv6Address(addr: string): void {
   const entry = _registeredAddrs.get(addr);
-  removeAddressFromInterface(addr, entry ? entry.iface : interfaceForAddress(addr));
-  _registeredAddrs.delete(addr);
+  if (entry) {
+    if (entry.configured) removeAddressFromInterface(addr, entry.iface);
+    _registeredAddrs.delete(addr);
+    return;
+  }
+  removeAddressFromInterface(addr, interfaceForAddress(addr));
 }
 
 /**
@@ -498,7 +571,7 @@ export function forceUnregisterIPv6Address(addr: string): void {
  */
 export function unregisterAllIPv6Addresses(): void {
   for (const [addr, entry] of _registeredAddrs) {
-    removeAddressFromInterface(addr, entry.iface);
+    if (entry.configured) removeAddressFromInterface(addr, entry.iface);
   }
   _registeredAddrs.clear();
 }

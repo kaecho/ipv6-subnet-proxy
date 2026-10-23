@@ -29,6 +29,12 @@ const REP_TTL_EXPIRED = 0x06;
 const REP_COMMAND_NOT_SUPPORTED = 0x07;
 const REP_ADDRESS_TYPE_NOT_SUPPORTED = 0x08;
 
+/**
+ * Bound the method/auth/request exchange. This timer is cleared as soon as the
+ * request arrives, so relayed connections may sit idle without being cut.
+ */
+const HANDSHAKE_TIMEOUT_MS = 30_000;
+
 export function createSocks5Server(port: number): net.Server {
   const log = getLogger();
 
@@ -45,6 +51,13 @@ export function createSocks5Server(port: number): net.Server {
       if (sessionId) closeSession(sessionId);
     });
 
+    // A client that connects and never sends a method selection would hold
+    // this socket forever, and later a session slot too.
+    clientSocket.setTimeout(HANDSHAKE_TIMEOUT_MS, () => {
+      log.debug('SOCKS5 handshake timed out');
+      clientSocket.destroy();
+    });
+
     // Phase 1: Method negotiation
     clientSocket.once('data', (data) => {
       if (data.length < 3 || data[0] !== SOCKS_VERSION) {
@@ -55,56 +68,68 @@ export function createSocks5Server(port: number): net.Server {
       clientSocket.write(Buffer.from([SOCKS_VERSION, AUTH_USER_PASS]));
 
       // Phase 2: Authentication (RFC 1929)
-      clientSocket.once('data', (authData) => {
-        if (authData.length < 4 || authData[0] !== 0x01) {
-          clientSocket.write(Buffer.from([0x01, 0x01]));
-          clientSocket.destroy();
-          return;
-        }
-
-        const ulen = authData[1];
-        const username = authData.slice(2, 2 + ulen).toString();
-        const plen = authData[2 + ulen];
-        const password = authData.slice(3 + ulen, 3 + ulen + plen).toString();
-
-        const user = verifyCredentials(username, password);
-        if (!user) {
-          log.warn({ username }, 'SOCKS5 authentication failed');
-          clientSocket.write(Buffer.from([0x01, 0x01]));
-          clientSocket.destroy();
-          return;
-        }
-
-        const userId = user.id;
-
-        // Rate limit check
-        const limits = getRateLimitRules(userId);
-        if (limits.max_connections !== null) {
-          if (getConnectionCount(userId) >= limits.max_connections) {
-            log.warn({ userId }, 'Connection limit exceeded');
+      clientSocket.once('data', async (authData) => {
+        try {
+          if (authData.length < 4 || authData[0] !== 0x01) {
             clientSocket.write(Buffer.from([0x01, 0x01]));
             clientSocket.destroy();
             return;
           }
-        }
 
-        if (limits.max_bandwidth !== null) {
-          bucket = getOrCreateTokenBucket(userId, limits.max_bandwidth);
-        }
+          const ulen = authData[1];
+          const username = authData.slice(2, 2 + ulen).toString();
+          const plen = authData[2 + ulen];
+          const password = authData.slice(3 + ulen, 3 + ulen + plen).toString();
 
-        clientSocket.write(Buffer.from([0x01, 0x00])); // auth success
+          const user = await verifyCredentials(username, password);
+          // bcrypt ran off the event loop; the client may be gone by now.
+          if (clientSocket.destroyed) return;
+          if (!user) {
+            log.warn({ username }, 'SOCKS5 authentication failed');
+            clientSocket.write(Buffer.from([0x01, 0x01]));
+            clientSocket.destroy();
+            return;
+          }
 
-        // Phase 3: Request
-        clientSocket.once('data', (reqData) => {
-          // Request handling is async (target resolution); an escaping
-          // rejection would otherwise take down the process.
-          handleRequest(reqData, clientSocket, userId, user.mode, bucket).catch((err) => {
-            log.error({ err: err.message, userId }, 'Unhandled error while handling SOCKS5 request');
-            if (!clientSocket.destroyed) {
+          const userId = user.id;
+
+          // Rate limit check
+          const limits = getRateLimitRules(userId);
+          if (limits.max_connections !== null) {
+            if (getConnectionCount(userId) >= limits.max_connections) {
+              log.warn({ userId }, 'Connection limit exceeded');
+              clientSocket.write(Buffer.from([0x01, 0x01]));
               clientSocket.destroy();
+              return;
             }
+          }
+
+          if (limits.max_bandwidth !== null) {
+            bucket = getOrCreateTokenBucket(userId, limits.max_bandwidth);
+          }
+
+          clientSocket.write(Buffer.from([0x01, 0x00])); // auth success
+
+          // Phase 3: Request
+          clientSocket.once('data', (reqData) => {
+            // The handshake is complete; long-lived relays must not inherit
+            // the handshake deadline.
+            clientSocket.setTimeout(0);
+            // Request handling is async (target resolution); an escaping
+            // rejection would otherwise take down the process.
+            handleRequest(reqData, clientSocket, userId, user.mode, bucket).catch((err) => {
+              log.error({ err: err.message, userId }, 'Unhandled error while handling SOCKS5 request');
+              if (!clientSocket.destroyed) {
+                clientSocket.destroy();
+              }
+            });
           });
-        });
+        } catch (err) {
+          log.error({ err }, 'Error while authenticating SOCKS5 client');
+          if (!clientSocket.destroyed) {
+            clientSocket.destroy();
+          }
+        }
       });
     });
 

@@ -29,4 +29,10 @@ sysctl -w net.ipv6.ip_nonlocal_bind=1
 
 To make this permanent, add `net.ipv6.ip_nonlocal_bind=1` to `/etc/sysctl.conf` or `/etc/sysctl.d/99-ipv6.conf`.
 
+When the kernel has a `local` route for the whole prefix (as the built-in 6in4 tunnel sets up), the proxy does not add each session's `/128` to an interface; `ip_nonlocal_bind=1` is enough to bind it. Native subnets that depend on NDP (bridged or LXC setups) are still registered per address.
+
+### Handshake Timeout
+
+A client has 30 seconds to complete the SOCKS5 method selection, authentication, and CONNECT request. Connections that stay silent are closed so they cannot hold a slot indefinitely. Idle relayed connections are not subject to this timer.
+
 ---

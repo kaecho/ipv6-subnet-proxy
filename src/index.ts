@@ -7,7 +7,7 @@ import { createApiServer } from './api/server';
 import { addSubnet, getSubnetByCidr, bindSubnetToAllUsers, pruneSubnetsBySource } from './core/subnets';
 import { startTunnel, stopTunnel, startEndpointWatcher } from './core/tunnel';
 import { startWarp, stopWarp } from './core/warp';
-import { detectIPv6Subnets, unregisterAllIPv6Addresses } from './utils/ipv6';
+import { detectIPv6Subnets, unregisterAllIPv6Addresses, ensureNonlocalBind } from './utils/ipv6';
 
 /**
  * Register a subnet the proxy brought up itself, and make sure everyone can
@@ -31,6 +31,17 @@ async function main(): Promise<void> {
   const log = getLogger();
 
   log.info('Starting IPv6 Subnet Proxy...');
+
+  // Binding a session's source address out of a routed prefix must work even
+  // when that /128 is not configured on an interface. Best effort: containers
+  // with a read-only /proc have to set this on the host.
+  if (!ensureNonlocalBind()) {
+    log.warn(
+      'net.ipv6.ip_nonlocal_bind is not enabled and could not be set. ' +
+        'Sessions cannot bind non-local IPv6 addresses until the host runs: ' +
+        'sysctl -w net.ipv6.ip_nonlocal_bind=1'
+    );
+  }
 
   // Database
   const db = getDb(config.dbPath);
