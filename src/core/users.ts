@@ -42,6 +42,11 @@ interface AuthCacheEntry {
 }
 
 const authCache = new Map<string, AuthCacheEntry>();
+/**
+ * Bumped whenever the cache is cleared. An async bcrypt comparison that
+ * started before an update must not write its now-stale result back in.
+ */
+let authCacheGeneration = 0;
 
 /** Key by username + password, never the plaintext password itself. */
 function authCacheKey(username: string, password: string): string {
@@ -102,6 +107,7 @@ export function createUser(input: CreateUserInput): User {
 export async function verifyCredentials(username: string, password: string): Promise<User | null> {
   const key = authCacheKey(username, password);
   const now = Date.now();
+  const generation = authCacheGeneration;
   const cached = authCache.get(key);
   if (cached) {
     if (cached.expiresAt > now) return cached.user;
@@ -116,6 +122,9 @@ export async function verifyCredentials(username: string, password: string): Pro
   if (!row || row.status === 'disabled') return null;
   // Async compare keeps the event loop free while bcrypt works in libuv.
   if (!(await bcrypt.compare(password, row.password))) return null;
+  // A password/status change landed while bcrypt was running. The row we
+  // read is no longer authoritative; reject rather than caching it.
+  if (generation !== authCacheGeneration) return null;
 
   const user = rowToUser(row);
   pruneAuthCache(now);
@@ -146,10 +155,6 @@ export function updateUser(id: string, input: UpdateUserInput): User {
   const user = getUser(id);
   if (!user) throw new Error(`User ${id} not found`);
 
-  // Password, mode and status all feed the authenticated identity; a cached
-  // success must not outlive any of them.
-  authCache.clear();
-
   if (input.password !== undefined) {
     const config = loadConfig();
     const hashedPassword = bcrypt.hashSync(input.password, config.bcryptRounds);
@@ -167,6 +172,11 @@ export function updateUser(id: string, input: UpdateUserInput): User {
       .run(input.status, now, id);
     log.info({ userId: id, status: input.status }, 'User status updated');
   }
+
+  // Invalidate only after the writes land: a verification that read the old
+  // row either finishes before this clear or sees a generation mismatch.
+  authCache.clear();
+  authCacheGeneration++;
 
   return getUser(id)!;
 }
@@ -192,5 +202,6 @@ export function deleteUser(id: string): void {
 
   db.prepare('DELETE FROM users WHERE id = ?').run(id);
   authCache.clear();
+  authCacheGeneration++;
   log.info({ userId: id }, 'User deleted');
 }
