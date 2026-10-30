@@ -22,7 +22,7 @@ features:
   - title: Free IPv6 if the host has none
     details: Built-in Cloudflare WARP (no signup) and Hurricane Electric 6in4 tunnel client
   - title: Per-user allocation
-    details: sticky or random IPv6 addresses, rate limits, traffic stats, audit log
+    details: Random or sticky IPv6 chosen by SOCKS5 username; rate limits, traffic stats, audit log
   - title: CDN edge borrowing
     details: Reach AAAA-less names over IPv6 through dual-stack CDN edges
 ---

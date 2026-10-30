@@ -60,4 +60,6 @@ curl -X POST http://localhost:3000/api/v1/users \
 
 用户创建后即自动绑定所有活跃子网，可直接使用代理。也可以通过 API 手动管理子网和绑定关系。
 
+SOCKS5 代理地址为 `localhost:1080`，用户名为 `alice`、密码为 `secret123` 时每次连接随机 IPv6；使用 `alice-sticky` 获得固定地址，使用 `alice-sticky-<key>` 并通过更换 key 来切换地址。详见 [SOCKS5 使用说明](/zh/socks5#用用户名选择地址模式)。
+
 ---

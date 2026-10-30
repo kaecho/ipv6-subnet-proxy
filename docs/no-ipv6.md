@@ -45,8 +45,8 @@ export WARP_ACCOUNTS=8
 
 Each account becomes its own WireGuard interface (`warp0`…`warp7`) with its own address, and each address is registered as a one-address subnet. From there the proxy's existing per-user subnet selection does the rotation with no extra machinery:
 
-- **`random` users** get a different WARP address on every connection.
-- **`sticky` users** are pinned to one WARP address and keep it across reconnects.
+- **Random usernames** (`alice` or `alice-random`) get a different WARP address on every connection.
+- **Sticky usernames** (`alice-sticky`) are pinned to one WARP address and keep it across reconnects; `alice-sticky-<key>` pins an independent address per key.
 
 Registrations are stored in the database and reused, so restarts keep the same addresses instead of burning through Cloudflare's registration quota. To deliberately rotate to a fresh set, start once with `WARP_RESET=true`; the addresses they replace are dropped from the pool automatically.
 

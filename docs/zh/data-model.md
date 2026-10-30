@@ -7,7 +7,6 @@
 | `id` | TEXT (UUID) | 主键 |
 | `username` | TEXT | 唯一用户名 |
 | `password` | TEXT | bcrypt 哈希 |
-| `mode` | TEXT | `sticky` 或 `random` |
 | `status` | TEXT | `active` 或 `disabled` |
 | `created_at` | TEXT | ISO 8601 时间戳 |
 | `updated_at` | TEXT | ISO 8601 时间戳 |
@@ -29,8 +28,12 @@
 | `id` | TEXT (UUID) | 主键 |
 | `user_id` | TEXT | 引用 users(id) |
 | `subnet_id` | TEXT | 引用 subnets(id) |
+| `sticky_key` | TEXT | SOCKS5 用户名中的桶名（普通 `-sticky` 为 `default`） |
 | `ipv6_addr` | TEXT | 分配的 IPv6 地址（完整展开格式） |
 | `bound_at` | TEXT | ISO 8601 时间戳 |
+| `last_used_at` | TEXT | 最近连接时间；带 key 的行空闲 24 小时会被删除（`default` 除外） |
+
+`(user_id, subnet_id, sticky_key)` 唯一。`sticky_key` 与 `last_used_at` 由自动迁移添加；旧数据会归入 `default` 桶。
 
 ### 流量统计表 (traffic_stats)
 

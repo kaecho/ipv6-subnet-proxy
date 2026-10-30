@@ -16,18 +16,17 @@ All API endpoints are prefixed with `/api/v1`. Authentication is via the `X-API-
 | `POST` | `/api/v1/users` | Create a user |
 | `GET` | `/api/v1/users` | List all users |
 | `GET` | `/api/v1/users/:id` | Get a user by ID |
-| `PATCH` | `/api/v1/users/:id` | Update user (password, mode, status) |
+| `PATCH` | `/api/v1/users/:id` | Update user (password, status) |
 | `DELETE` | `/api/v1/users/:id` | Delete a user |
-| `POST` | `/api/v1/users/:id/refresh` | Refresh sticky IPv6 bindings |
-| `GET` | `/api/v1/users/:id/current-ip` | Get current sticky addresses |
+| `POST` | `/api/v1/users/:id/refresh` | Clear every sticky bucket for the user |
+| `GET` | `/api/v1/users/:id/current-ip` | List current sticky buckets |
 
 **POST /api/v1/users**
 
 ```json
 {
   "username": "alice",
-  "password": "secret123",
-  "mode": "random"
+  "password": "secret123"
 }
 ```
 
@@ -36,8 +35,27 @@ All API endpoints are prefixed with `/api/v1`. Authentication is via the `X-API-
 ```json
 {
   "password": "newpass",
-  "mode": "random",
   "status": "disabled"
+}
+```
+
+The `mode` field is no longer accepted. Allocation is chosen by the SOCKS5 username: `alice` / `alice-random` is random, `alice-sticky` is the default sticky bucket, and `alice-sticky-<key>` is an independent sticky bucket. See [SOCKS5 Proxy Usage](/socks5#username-selected-address-mode).
+
+`POST /api/v1/users/:id/refresh` deletes all sticky buckets for the user, including UUID-keyed buckets. The next connection gets new addresses. It returns `{ "success": true, "bindings": 3, "message": "Refreshed 3 sticky IPv6 binding(s)" }`.
+
+`GET /api/v1/users/:id/current-ip` returns one row per bucket:
+
+```json
+{
+  "userId": "<user-uuid>",
+  "addresses": [
+    {
+      "subnetId": "<subnet-uuid>",
+      "stickyKey": "default",
+      "ipv6Addr": "2001:db8:1:0:1234:5678:9abc:def0",
+      "lastUsedAt": "2026-10-31T12:00:00.000Z"
+    }
+  ]
 }
 ```
 

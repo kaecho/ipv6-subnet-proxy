@@ -16,18 +16,17 @@
 | `POST` | `/api/v1/users` | 创建用户 |
 | `GET` | `/api/v1/users` | 列出所有用户 |
 | `GET` | `/api/v1/users/:id` | 根据 ID 获取用户 |
-| `PATCH` | `/api/v1/users/:id` | 更新用户（密码、模式、状态） |
+| `PATCH` | `/api/v1/users/:id` | 更新用户（密码、状态） |
 | `DELETE` | `/api/v1/users/:id` | 删除用户 |
-| `POST` | `/api/v1/users/:id/refresh` | 刷新 sticky IPv6 绑定 |
-| `GET` | `/api/v1/users/:id/current-ip` | 获取当前的 sticky 地址 |
+| `POST` | `/api/v1/users/:id/refresh` | 清空该用户的全部粘性桶 |
+| `GET` | `/api/v1/users/:id/current-ip` | 列出当前粘性桶 |
 
 **POST /api/v1/users**
 
 ```json
 {
   "username": "alice",
-  "password": "secret123",
-  "mode": "random"
+  "password": "secret123"
 }
 ```
 
@@ -36,8 +35,27 @@
 ```json
 {
   "password": "newpass",
-  "mode": "random",
   "status": "disabled"
+}
+```
+
+不再接受 `mode` 字段。分配方式由 SOCKS5 用户名决定：`alice` / `alice-random` 为随机，`alice-sticky` 为默认粘性桶，`alice-sticky-<key>` 为独立粘性桶。详见 [SOCKS5 代理使用](/zh/socks5#用用户名选择地址模式)。
+
+`POST /api/v1/users/:id/refresh` 会删除该用户的全部粘性桶（包括 UUID key 的桶），下一次连接会获得新地址。返回 `{ "success": true, "bindings": 3, "message": "Refreshed 3 sticky IPv6 binding(s)" }`。
+
+`GET /api/v1/users/:id/current-ip` 每个桶返回一行：
+
+```json
+{
+  "userId": "<user-uuid>",
+  "addresses": [
+    {
+      "subnetId": "<subnet-uuid>",
+      "stickyKey": "default",
+      "ipv6Addr": "2001:db8:1:0:1234:5678:9abc:def0",
+      "lastUsedAt": "2026-10-31T12:00:00.000Z"
+    }
+  ]
 }
 ```
 

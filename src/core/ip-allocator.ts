@@ -4,33 +4,78 @@ import { getDb } from '../database/connection';
 import { parseCIDR, generateIPv6, registerIPv6Address, forceUnregisterIPv6Address } from '../utils/ipv6';
 import { getLogger } from '../utils/logger';
 import { getActiveSessions, forceDisconnect } from './sessions';
+import { DEFAULT_STICKY_KEY, type ProxyMode } from './proxy-username';
 
-/** Pick subnet for this connect. Sticky reuses existing sticky subnet; random picks among bindings. */
+/**
+ * A keyed sticky bucket that has not opened a connection for this long is
+ * dropped. Expiry is sliding: every reuse refreshes the timestamp. The plain
+ * `-sticky` default bucket is exempt and lasts until the API refresh clears it.
+ */
+export const STICKY_BINDING_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Stale rows are swept in the background so an abandoned key cannot pin an address forever. */
+const STICKY_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+
+interface StickyRow {
+  id: string;
+  user_id: string;
+  subnet_id: string;
+  sticky_key: string;
+  ipv6_addr: string;
+  bound_at: string;
+  last_used_at: string;
+}
+
+function stickyCutoff(nowMs: number): string {
+  return new Date(nowMs - STICKY_BINDING_TTL_MS).toISOString();
+}
+
+/** Pick subnet for this connect. Sticky reuses a live key bucket; random picks among bindings. */
 export function pickSubnetId(
   userId: string,
   subnetIds: string[],
-  mode: 'sticky' | 'random'
+  mode: ProxyMode,
+  stickyKey: string | null
 ): string {
   if (subnetIds.length === 0) {
     throw new Error('No active subnet bindings');
   }
   if (mode === 'sticky') {
+    if (!stickyKey) throw new Error('Sticky allocation requires a sticky key');
     const db = getDb();
     const placeholders = subnetIds.map(() => '?').join(',');
     const existing = db.prepare(
       `SELECT subnet_id FROM sticky_bindings
-       WHERE user_id = ? AND subnet_id IN (${placeholders})
-       ORDER BY bound_at ASC LIMIT 1`
-    ).get(userId, ...subnetIds) as { subnet_id: string } | undefined;
+       WHERE user_id = ? AND sticky_key = ?
+         AND (sticky_key = ? OR last_used_at >= ?)
+         AND subnet_id IN (${placeholders})
+       ORDER BY last_used_at ASC LIMIT 1`
+    ).get(
+      userId,
+      stickyKey,
+      DEFAULT_STICKY_KEY,
+      stickyCutoff(Date.now()),
+      ...subnetIds
+    ) as { subnet_id: string } | undefined;
     if (existing) return existing.subnet_id;
   }
   return subnetIds[crypto.randomInt(subnetIds.length)];
 }
 
+/**
+ * Drop an address from the host interface unless a live session still sources
+ * from it. The session's own close path releases the remaining reference.
+ */
+function releaseStickyAddress(addr: string): void {
+  if (getActiveSessions().some((session) => session.ipv6Addr === addr)) return;
+  forceUnregisterIPv6Address(addr);
+}
+
 export function allocateForUser(
   userId: string,
   subnetId: string,
-  mode: 'sticky' | 'random'
+  mode: ProxyMode,
+  stickyKey: string | null
 ): string {
   const db = getDb();
   const log = getLogger();
@@ -45,24 +90,49 @@ export function allocateForUser(
   const parsed = parseCIDR(subnet.cidr);
 
   if (mode === 'sticky') {
-    // Use IMMEDIATE transaction to prevent TOCTOU race:
-    // two concurrent allocations for the same user+subnet could both
-    // see no existing binding and try to INSERT simultaneously.
-    const insertSticky = db.transaction(() => {
-      const existing = db.prepare(
-        'SELECT ipv6_addr FROM sticky_bindings WHERE user_id = ? AND subnet_id = ?'
-      ).get(userId, subnetId) as { ipv6_addr: string } | undefined;
+    if (!stickyKey) throw new Error('Sticky allocation requires a sticky key');
 
-      if (existing) {
-        log.debug({ userId, subnetId, ipv6Addr: existing.ipv6_addr }, 'Reusing sticky IPv6 address');
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
+    const cutoff = stickyCutoff(nowMs);
+
+    // IMMEDIATE transaction prevents two concurrent connections for the same
+    // key from both seeing no binding and inserting different addresses.
+    const upsertSticky = db.transaction(() => {
+      const existing = db.prepare(
+        'SELECT * FROM sticky_bindings WHERE user_id = ? AND subnet_id = ? AND sticky_key = ?'
+      ).get(userId, subnetId, stickyKey) as StickyRow | undefined;
+
+      if (
+        existing &&
+        (stickyKey === DEFAULT_STICKY_KEY || existing.last_used_at >= cutoff)
+      ) {
+        db.prepare('UPDATE sticky_bindings SET last_used_at = ? WHERE id = ?')
+          .run(now, existing.id);
+        log.debug(
+          { userId, subnetId, stickyKey, ipv6Addr: existing.ipv6_addr },
+          'Reusing sticky IPv6 address'
+        );
         // Re-register so refcount / NDP stays correct across sessions & restarts
         registerIPv6Address(existing.ipv6_addr);
         return existing.ipv6_addr;
       }
 
-      const existingAddrs = db.prepare(
-        'SELECT ipv6_addr FROM sticky_bindings WHERE subnet_id = ?'
-      ).all(subnetId).map((r: any) => r.ipv6_addr);
+      if (existing) {
+        db.prepare('DELETE FROM sticky_bindings WHERE id = ?').run(existing.id);
+        releaseStickyAddress(existing.ipv6_addr);
+        log.debug(
+          { userId, subnetId, stickyKey, ipv6Addr: existing.ipv6_addr },
+          'Expired sticky IPv6 address'
+        );
+      }
+
+      // A /128 subnet has no spare host bits: every key on it necessarily
+      // shares the one address (WARP registers each device as a /128).
+      const existingAddrs = parsed.prefixLength >= 128
+        ? []
+        : (db.prepare('SELECT ipv6_addr FROM sticky_bindings WHERE subnet_id = ?')
+          .all(subnetId) as { ipv6_addr: string }[]).map((row) => row.ipv6_addr);
 
       let addr: string;
       let attempts = 0;
@@ -74,19 +144,22 @@ export function allocateForUser(
         }
       } while (existingAddrs.includes(addr));
 
-      const id = uuidv4();
-      const now = new Date().toISOString();
       db.prepare(
-        'INSERT INTO sticky_bindings (id, user_id, subnet_id, ipv6_addr, bound_at) VALUES (?, ?, ?, ?, ?)'
-      ).run(id, userId, subnetId, addr, now);
+        `INSERT INTO sticky_bindings
+           (id, user_id, subnet_id, sticky_key, ipv6_addr, bound_at, last_used_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(uuidv4(), userId, subnetId, stickyKey, addr, now, now);
 
-      log.info({ userId, subnetId, ipv6Addr: addr }, 'Allocated new sticky IPv6 address');
+      log.info(
+        { userId, subnetId, stickyKey, ipv6Addr: addr },
+        'Allocated new sticky IPv6 address'
+      );
       // Register on host interface so upstream NDP can route return traffic
       registerIPv6Address(addr);
       return addr;
     });
 
-    return insertSticky();
+    return upsertSticky();
   }
 
   // Random mode
@@ -96,46 +169,128 @@ export function allocateForUser(
   return addr;
 }
 
+/** Delete every key bucket for one user+subnet (used when a binding is removed). */
 export function refreshStickyBinding(userId: string, subnetId: string): void {
   const db = getDb();
   const log = getLogger();
 
-  // Unregister old address from interface before deleting
-  const existing = db.prepare(
-    'SELECT ipv6_addr FROM sticky_bindings WHERE user_id = ? AND subnet_id = ?'
-  ).get(userId, subnetId) as { ipv6_addr: string } | undefined;
-  if (existing) {
-    // Live sessions still source from the old sticky IP — drop them so
-    // the next connect allocates a fresh address.
-    for (const s of getActiveSessions()) {
-      if (s.userId === userId && s.ipv6Addr === existing.ipv6_addr) {
-        forceDisconnect(s.id);
-      }
-    }
-    forceUnregisterIPv6Address(existing.ipv6_addr);
-  }
+  const rows = db.prepare(
+    'SELECT * FROM sticky_bindings WHERE user_id = ? AND subnet_id = ?'
+  ).all(userId, subnetId) as StickyRow[];
 
-  const result = db.prepare(
-    'DELETE FROM sticky_bindings WHERE user_id = ? AND subnet_id = ?'
-  ).run(userId, subnetId);
-  log.info({ userId, subnetId, deleted: result.changes > 0 }, 'Sticky binding refreshed');
+  discardStickyRows(userId, rows);
+  db.prepare('DELETE FROM sticky_bindings WHERE user_id = ? AND subnet_id = ?')
+    .run(userId, subnetId);
+  log.info({ userId, subnetId, deleted: rows.length }, 'Sticky bindings refreshed');
 }
 
-export function getCurrentStickyAddress(userId: string): { subnetId: string; ipv6Addr: string }[] {
+/** Delete every sticky key bucket for a user (the API's switch-IP action). */
+export function refreshUserStickyBindings(userId: string): number {
+  const db = getDb();
+  const log = getLogger();
+
+  const rows = db.prepare(
+    'SELECT * FROM sticky_bindings WHERE user_id = ?'
+  ).all(userId) as StickyRow[];
+
+  discardStickyRows(userId, rows);
+  db.prepare('DELETE FROM sticky_bindings WHERE user_id = ?').run(userId);
+  log.info({ userId, deleted: rows.length }, 'All sticky bindings refreshed for user');
+  return rows.length;
+}
+
+export interface CurrentStickyAddress {
+  subnetId: string;
+  stickyKey: string;
+  ipv6Addr: string;
+  lastUsedAt: string;
+}
+
+export function getCurrentStickyAddress(userId: string): CurrentStickyAddress[] {
   const db = getDb();
   return (db.prepare(
-    'SELECT subnet_id, ipv6_addr FROM sticky_bindings WHERE user_id = ?'
-  ).all(userId) as any[]).map(r => ({ subnetId: r.subnet_id, ipv6Addr: r.ipv6_addr }));
+    'SELECT subnet_id, sticky_key, ipv6_addr, last_used_at FROM sticky_bindings WHERE user_id = ? ORDER BY sticky_key'
+  ).all(userId) as {
+    subnet_id: string;
+    sticky_key: string;
+    ipv6_addr: string;
+    last_used_at: string;
+  }[]).map((row) => ({
+    subnetId: row.subnet_id,
+    stickyKey: row.sticky_key,
+    ipv6Addr: row.ipv6_addr,
+    lastUsedAt: row.last_used_at,
+  }));
 }
 
 export function removeAllStickyBindings(userId: string): void {
   const db = getDb();
-  // Unregister all addresses for this user before deleting
-  const addrs = db.prepare(
-    'SELECT ipv6_addr FROM sticky_bindings WHERE user_id = ?'
-  ).all(userId) as { ipv6_addr: string }[];
-  for (const a of addrs) {
-    forceUnregisterIPv6Address(a.ipv6_addr);
+  const rows = db.prepare(
+    'SELECT * FROM sticky_bindings WHERE user_id = ?'
+  ).all(userId) as StickyRow[];
+
+  for (const row of rows) {
+    forceUnregisterIPv6Address(row.ipv6_addr);
   }
   db.prepare('DELETE FROM sticky_bindings WHERE user_id = ?').run(userId);
+}
+
+function discardStickyRows(userId: string, rows: StickyRow[]): void {
+  if (rows.length === 0) return;
+  const addresses = new Set(rows.map((row) => row.ipv6_addr));
+  for (const session of getActiveSessions()) {
+    if (session.userId === userId && addresses.has(session.ipv6Addr)) {
+      forceDisconnect(session.id);
+    }
+  }
+  for (const addr of addresses) {
+    forceUnregisterIPv6Address(addr);
+  }
+}
+
+/**
+ * Delete key buckets idle past the TTL. Rows with a live session are kept
+ * until that session ends; otherwise the binding would outlive its own use.
+ */
+export function cleanupExpiredStickyBindings(nowMs = Date.now()): number {
+  const db = getDb();
+  const log = getLogger();
+  const rows = db.prepare(
+    'SELECT * FROM sticky_bindings WHERE last_used_at < ? AND sticky_key <> ?'
+  ).all(stickyCutoff(nowMs), DEFAULT_STICKY_KEY) as StickyRow[];
+
+  const inUse = new Set(getActiveSessions().map((session) => session.ipv6Addr));
+  const expired = rows.filter((row) => !inUse.has(row.ipv6_addr));
+  if (expired.length === 0) return 0;
+
+  const remove = db.prepare('DELETE FROM sticky_bindings WHERE id = ?');
+  db.transaction(() => {
+    for (const row of expired) remove.run(row.id);
+  })();
+
+  for (const row of expired) {
+    forceUnregisterIPv6Address(row.ipv6_addr);
+  }
+  log.info({ removed: expired.length }, 'Cleaned up expired sticky bindings');
+  return expired.length;
+}
+
+/** Start the background sweep; the timer is unref'd so it never holds the process open. */
+export function startStickyBindingCleanup(
+  intervalMs = STICKY_CLEANUP_INTERVAL_MS
+): NodeJS.Timeout {
+  const log = getLogger();
+  const sweep = (): void => {
+    try {
+      cleanupExpiredStickyBindings();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn({ err: message }, 'Failed to clean up expired sticky bindings');
+    }
+  };
+
+  sweep();
+  const timer = setInterval(sweep, intervalMs);
+  timer.unref();
+  return timer;
 }

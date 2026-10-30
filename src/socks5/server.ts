@@ -1,7 +1,6 @@
 import net from 'net';
-import crypto from 'crypto';
 import { getLogger } from '../utils/logger';
-import { verifyCredentials } from '../core/users';
+import { authenticateProxyUser } from '../core/users';
 import { allocateForUser, pickSubnetId } from '../core/ip-allocator';
 import {
   createSession,
@@ -81,17 +80,17 @@ export function createSocks5Server(port: number): net.Server {
           const plen = authData[2 + ulen];
           const password = authData.slice(3 + ulen, 3 + ulen + plen).toString();
 
-          const user = await verifyCredentials(username, password);
+          const identity = await authenticateProxyUser(username, password);
           // bcrypt ran off the event loop; the client may be gone by now.
           if (clientSocket.destroyed) return;
-          if (!user) {
+          if (!identity) {
             log.warn({ username }, 'SOCKS5 authentication failed');
             clientSocket.write(Buffer.from([0x01, 0x01]));
             clientSocket.destroy();
             return;
           }
 
-          const userId = user.id;
+          const userId = identity.user.id;
 
           // Rate limit check
           const limits = getRateLimitRules(userId);
@@ -117,7 +116,14 @@ export function createSocks5Server(port: number): net.Server {
             clientSocket.setTimeout(0);
             // Request handling is async (target resolution); an escaping
             // rejection would otherwise take down the process.
-            handleRequest(reqData, clientSocket, userId, user.mode, bucket).catch((err) => {
+            handleRequest(
+              reqData,
+              clientSocket,
+              userId,
+              identity.mode,
+              identity.stickyKey,
+              bucket
+            ).catch((err) => {
               log.error({ err: err.message, userId }, 'Unhandled error while handling SOCKS5 request');
               if (!clientSocket.destroyed) {
                 clientSocket.destroy();
@@ -138,6 +144,7 @@ export function createSocks5Server(port: number): net.Server {
       clientSocket: net.Socket,
       userId: string,
       mode: 'sticky' | 'random',
+      stickyKey: string | null,
       bucket: TokenBucket | null
     ): Promise<void> {
       if (data.length < 5 || data[0] !== SOCKS_VERSION) {
@@ -183,7 +190,7 @@ export function createSocks5Server(port: number): net.Server {
         return;
       }
 
-      log.debug({ userId, targetHost, targetPort, mode }, 'SOCKS5 CONNECT');
+      log.debug({ userId, targetHost, targetPort, mode, stickyKey }, 'SOCKS5 CONNECT');
 
       // Resolve to a concrete IPv6 address first. Names without an AAAA
       // record are often still reachable over IPv6 through their CDN, and
@@ -230,12 +237,13 @@ export function createSocks5Server(port: number): net.Server {
       const subnetId = pickSubnetId(
         userId,
         bindings.map((b) => b.subnet_id),
-        mode
+        mode,
+        stickyKey
       );
 
       let ipv6Addr: string;
       try {
-        ipv6Addr = allocateForUser(userId, subnetId, mode);
+        ipv6Addr = allocateForUser(userId, subnetId, mode, stickyKey);
       } catch (err: any) {
         log.error({ err: err.message, userId }, 'Failed to allocate IPv6');
         sendReply(clientSocket, REP_GENERAL_FAILURE);

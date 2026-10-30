@@ -73,6 +73,6 @@ curl -X POST http://localhost:3000/api/v1/users/<USER_ID>/bindings \
   -d '{"subnet_id": "<SUBNET_ID>"}'
 ```
 
-Now use SOCKS5 proxy at `localhost:1080` with username `alice` and password `secret123`.
+Now use the SOCKS5 proxy at `localhost:1080` with username `alice` and password `secret123`. That username gives a random address per connection. Use `alice-sticky` for a fixed address, or `alice-sticky-<key>` to switch addresses by changing the key. See [SOCKS5 usage](/socks5#username-selected-address-mode).
 
 ---

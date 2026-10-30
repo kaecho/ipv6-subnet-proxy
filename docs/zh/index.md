@@ -22,7 +22,7 @@ features:
   - title: 宿主机没有 IPv6 也能用
     details: 内置 Cloudflare WARP（免注册）与 Hurricane Electric 6in4 隧道客户端
   - title: 用户级地址分配
-    details: sticky / random 两种模式，速率限制、流量统计、审计日志
+    details: 由 SOCKS5 用户名选择随机或粘性 IPv6，速率限制、流量统计、审计日志
   - title: CDN 边缘借用
     details: 无 AAAA 的域名也可经双栈 CDN 边缘走 IPv6 访问
 ---

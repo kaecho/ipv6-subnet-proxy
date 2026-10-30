@@ -2,19 +2,29 @@ import { FastifyInstance } from 'fastify';
 import {
   createUser, getUser, listUsers, updateUser, deleteUser,
 } from '../../core/users';
-import { refreshStickyBinding, getCurrentStickyAddress } from '../../core/ip-allocator';
+import { refreshUserStickyBindings, getCurrentStickyAddress } from '../../core/ip-allocator';
 import { logAction } from '../../core/audit';
-import { getDb } from '../../database/connection';
+
+const MODE_REMOVED_MESSAGE =
+  'The mode field is no longer supported; append -random or -sticky (optionally -sticky-<key>) to the SOCKS5 username instead';
 
 export function registerUserRoutes(app: FastifyInstance): void {
   app.post('/users', async (request, reply) => {
-    const { username, password, mode } = request.body as any;
+    const body = request.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'A JSON object body is required' });
+    }
+    if ('mode' in body) {
+      return reply.code(400).send({ error: 'BadRequest', message: MODE_REMOVED_MESSAGE });
+    }
+    const username = 'username' in body && typeof body.username === 'string' ? body.username : '';
+    const password = 'password' in body && typeof body.password === 'string' ? body.password : '';
     if (!username || !password) {
       return reply.code(400).send({ error: 'BadRequest', message: 'username and password are required' });
     }
     try {
-      const user = createUser({ username, password, mode });
-      logAction('user.created', { username, mode }, user.id);
+      const user = createUser({ username, password });
+      logAction('user.created', { username }, user.id);
       reply.code(201).send(user);
     } catch (err: any) {
       if (err.message?.includes('UNIQUE constraint')) {
@@ -27,19 +37,38 @@ export function registerUserRoutes(app: FastifyInstance): void {
   app.get('/users', async () => listUsers());
 
   app.get('/users/:id', async (request, reply) => {
-    const { id } = request.params as any;
+    const { id } = request.params as { id: string };
     const user = getUser(id);
     if (!user) return reply.code(404).send({ error: 'NotFound', message: 'User not found' });
     return user;
   });
 
   app.patch('/users/:id', async (request, reply) => {
-    const { id } = request.params as any;
-    const input = request.body as any;
+    const { id } = request.params as { id: string };
+    const body = request.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'A JSON object body is required' });
+    }
+    if ('mode' in body) {
+      return reply.code(400).send({ error: 'BadRequest', message: MODE_REMOVED_MESSAGE });
+    }
+
+    const password = 'password' in body && typeof body.password === 'string'
+      ? body.password
+      : undefined;
+    if ('password' in body && password === undefined) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'password must be a string' });
+    }
+    const status = 'status' in body && (body.status === 'active' || body.status === 'disabled')
+      ? body.status
+      : undefined;
+    if ('status' in body && status === undefined) {
+      return reply.code(400).send({ error: 'BadRequest', message: 'status must be active or disabled' });
+    }
+
     try {
-      const user = updateUser(id, { password: input.password, mode: input.mode, status: input.status });
-      // Strip password from audit log to prevent credential leak
-      const { password, ...safeInput } = input;
+      const user = updateUser(id, { password, status });
+      const safeInput = { password: password === undefined ? undefined : '[redacted]', status };
       logAction('user.updated', safeInput, id);
       return user;
     } catch (err: any) {
@@ -51,7 +80,7 @@ export function registerUserRoutes(app: FastifyInstance): void {
   });
 
   app.delete('/users/:id', async (request, reply) => {
-    const { id } = request.params as any;
+    const { id } = request.params as { id: string };
     const user = getUser(id);
     if (!user) return reply.code(404).send({ error: 'NotFound', message: 'User not found' });
     deleteUser(id);
@@ -60,22 +89,21 @@ export function registerUserRoutes(app: FastifyInstance): void {
   });
 
   app.post('/users/:id/refresh', async (request, reply) => {
-    const { id } = request.params as any;
+    const { id } = request.params as { id: string };
     const user = getUser(id);
     if (!user) return reply.code(404).send({ error: 'NotFound', message: 'User not found' });
 
-    const db = getDb();
-    const bindings = db.prepare(
-      'SELECT subnet_id FROM user_subnet_bindings WHERE user_id = ?'
-    ).all(id) as { subnet_id: string }[];
-    for (const b of bindings) refreshStickyBinding(id, b.subnet_id);
-
-    logAction('ip.refreshed', { subnetCount: bindings.length }, id);
-    return { success: true, message: `Refreshed IPv6 address for ${bindings.length} subnet(s)` };
+    const bindings = refreshUserStickyBindings(id);
+    logAction('ip.refreshed', { bindings }, id);
+    return {
+      success: true,
+      bindings,
+      message: `Refreshed ${bindings} sticky IPv6 binding(s)`,
+    };
   });
 
   app.get('/users/:id/current-ip', async (request, reply) => {
-    const { id } = request.params as any;
+    const { id } = request.params as { id: string };
     const user = getUser(id);
     if (!user) return reply.code(404).send({ error: 'NotFound', message: 'User not found' });
     return { userId: id, addresses: getCurrentStickyAddress(id) };

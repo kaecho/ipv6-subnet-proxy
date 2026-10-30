@@ -5,6 +5,7 @@ import { runMigrations } from './database/migrations';
 import { createSocks5Server } from './socks5/server';
 import { createApiServer } from './api/server';
 import { addSubnet, getSubnetByCidr, bindSubnetToAllUsers, pruneSubnetsBySource } from './core/subnets';
+import { startStickyBindingCleanup } from './core/ip-allocator';
 import { startTunnel, stopTunnel, startEndpointWatcher } from './core/tunnel';
 import { startWarp, stopWarp } from './core/warp';
 import { detectIPv6Subnets, unregisterAllIPv6Addresses, ensureNonlocalBind } from './utils/ipv6';
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
   // Database
   const db = getDb(config.dbPath);
   runMigrations(db);
+  const stickyCleanup = startStickyBindingCleanup();
   log.info({ dbPath: config.dbPath }, 'Database initialized');
 
   // Bring up the 6in4 tunnel first: on a host with no IPv6 of its own, the
@@ -102,8 +104,8 @@ async function main(): Promise<void> {
   }
 
   // Each WARP link contributes exactly one address, registered as a /128
-  // subnet. Users in `random` mode then rotate across them connection by
-  // connection, the same way they would across several /64s.
+  // subnet. A random-valued SOCKS5 username then rotates across them connection
+  // by connection, the same way it would across several /64s.
   for (const cidr of warpCidrs) {
     registerManagedSubnet(cidr, 'warp');
   }
@@ -145,6 +147,7 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = (signal: string) => {
     log.info({ signal }, 'Shutting down...');
+    clearInterval(stickyCleanup);
     socks5Server.close();
     apiServer.close().then(() => {
       unregisterAllIPv6Addresses();
