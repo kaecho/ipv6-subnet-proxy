@@ -63,7 +63,7 @@ Details: [docs → No IPv6](https://kaecho.github.io/ipv6-subnet-proxy/no-ipv6)
 ```bash
 npm install && npm run build
 export API_KEY=your-secret-api-key
-# export DEFAULT_SUBNET=2001:db8:1::/64   # optional; auto-detects interfaces
+# export DEFAULT_SUBNET=2001:db8:1::/64   # optional explicit prefix
 npm start
 ```
 
@@ -79,6 +79,7 @@ All config is environment variables. Common ones:
 | `SOCKS5_PORT` | `1080` | Proxy listen port |
 | `API_PORT` | `3000` | REST API port |
 | `DEFAULT_SUBNET` | — | Register a CIDR on startup |
+| `DETECT_HOST_SUBNETS` | `false` | Also allocate from prefixes on the host interfaces |
 | `WARP_ENABLED` | `false` | Free IPv6 via Cloudflare WARP |
 | `WARP_ACCOUNTS` | `1` | WARP devices (= egress addresses) |
 | `HE_TUNNEL_ID` | — | tunnelbroker.net tunnel id |

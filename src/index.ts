@@ -67,9 +67,11 @@ async function main(): Promise<void> {
   const warp = await startWarp(config.warp);
   const warpCidrs = warp.up && config.warp.registerSubnets ? warp.cidrs : [];
 
-  // Auto-detect only when DEFAULT_SUBNET is not set (env is authoritative).
+  // Host prefixes are opt-in. A /128 or an unrouted prefix on the NIC is not
+  // a pool: sourcing a session from it never gets a reply, which is a 30s
+  // connect timeout. Turning the flag off also drops prefixes detected earlier.
   let detectedSubnets: string[] = [];
-  if (!config.defaultSubnet) {
+  if (config.detectHostSubnets && !config.defaultSubnet) {
     log.info('Scanning network interfaces for IPv6 subnets...');
     // The tunnel link prefix shows up as an interface subnet, but only our one
     // endpoint address in it is ours; the routed prefixes are the pool.
@@ -81,6 +83,16 @@ async function main(): Promise<void> {
 
     for (const cidr of detectedSubnets) {
       registerManagedSubnet(cidr, 'detected');
+    }
+    const pruned = pruneSubnetsBySource('detected', detectedSubnets);
+    if (pruned.length > 0) {
+      log.info({ count: pruned.length, cidrs: pruned }, 'Dropped host prefixes that are no longer on an interface');
+    }
+  } else if (!config.detectHostSubnets) {
+    log.info('Host interface detection disabled');
+    const pruned = pruneSubnetsBySource('detected', []);
+    if (pruned.length > 0) {
+      log.info({ count: pruned.length, cidrs: pruned }, 'Dropped host subnets; DETECT_HOST_SUBNETS is off');
     }
   } else {
     log.info({ cidr: config.defaultSubnet }, 'DEFAULT_SUBNET set; skipping interface auto-detect');
@@ -104,6 +116,19 @@ async function main(): Promise<void> {
   for (const cidr of tunnelPrefixes) {
     registerManagedSubnet(cidr, 'tunnel');
   }
+
+  // A prefix that used to be routed here and no longer is must leave the pool.
+  // Otherwise sticky keys keep hashing onto an address the upstream will not
+  // route back, and every connect from it times out. Only prune once the
+  // tunnel is actually up, so a failed bring-up does not discard a pool that
+  // may return on the next start.
+  if (tunnel.up && config.tunnel.registerSubnets) {
+    const pruned = pruneSubnetsBySource('tunnel', tunnelPrefixes);
+    if (pruned.length > 0) {
+      log.info({ count: pruned.length, cidrs: pruned }, 'Dropped tunnel prefixes that are no longer routed');
+    }
+  }
+
 
   // Each WARP link contributes exactly one address, registered as a /128
   // subnet. A random-valued SOCKS5 username then rotates across them connection

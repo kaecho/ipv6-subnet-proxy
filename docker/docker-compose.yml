@@ -9,6 +9,9 @@ services:
     environment:
       - API_KEY=changeme
       - DEFAULT_SUBNET=
+      # Host NIC prefixes stay out of the pool unless this is true. An address
+      # the upstream does not route back shows up as a 30s connect timeout.
+      # - DETECT_HOST_SUBNETS=true
       - LOG_LEVEL=info
       # --- IPv6 via a free tunnel broker -----------------------------------
       # A host with no IPv6 of its own can still run this proxy: tunnelbroker.net

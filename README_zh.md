@@ -63,7 +63,7 @@ SOCKS5：`localhost:1080`，以下用户名的密码都是 `secret123`：
 ```bash
 npm install && npm run build
 export API_KEY=your-secret-api-key
-# export DEFAULT_SUBNET=2001:db8:1::/64   # 可选；默认从网卡自动检测
+# export DEFAULT_SUBNET=2001:db8:1::/64   # 可选，显式指定前缀
 npm start
 ```
 
@@ -79,6 +79,7 @@ npm start
 | `SOCKS5_PORT` | `1080` | 代理监听端口 |
 | `API_PORT` | `3000` | REST API 端口 |
 | `DEFAULT_SUBNET` | — | 启动时注册的 CIDR |
+| `DETECT_HOST_SUBNETS` | `false` | 同时从宿主机网卡上的前缀分配 |
 | `WARP_ENABLED` | `false` | 通过 Cloudflare WARP 获取免费 IPv6 |
 | `WARP_ACCOUNTS` | `1` | WARP 设备数（= 出口地址数） |
 | `HE_TUNNEL_ID` | — | tunnelbroker.net 隧道 ID |

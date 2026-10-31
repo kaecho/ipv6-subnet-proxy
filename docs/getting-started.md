@@ -30,20 +30,18 @@ cd ipv6-subnet-proxy
 npm install
 npm run build
 
-# Set required API key (subnets are auto-detected from host interfaces)
+# Set required API key. Host interface prefixes are not used unless
+# DETECT_HOST_SUBNETS=true. A tunnel or WARP brings its own prefix.
 export API_KEY=your-secret-api-key
 
-# Optional: manually specify a subnet if auto-detection fails
+# Optional: register one prefix yourself
 export DEFAULT_SUBNET=2001:db8:1::/64
 
 # Start
 npm start
 ```
 
-On startup, the program auto-detects IPv6 subnets from the host's network interfaces. You'll see log lines like:
-```
-info: Auto-registered detected IPv6 subnet { cidr: "2001:db8:1::/64" }
-```
+With `DETECT_HOST_SUBNETS=true` and no `DEFAULT_SUBNET`, startup also registers prefixes found on host interfaces.
 
 ### Verify
 

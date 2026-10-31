@@ -11,6 +11,7 @@
 | `DB_PATH` | `/data/proxy.db` | SQLite 数据库文件路径 |
 | `DEFAULT_SUBNET` | — | 启动时自动注册子网（CIDR 格式） |
 | `DEFAULT_SUBNET_GATEWAY` | — | 默认子网的网关地址 |
+| `DETECT_HOST_SUBNETS` | `false` | 把宿主机网卡上的 IPv6 前缀放进分配池。关闭时会把以前检测到的本机前缀从池里删掉，避免从上游不路由的地址出去而一直超时 |
 | `BCRYPT_ROUNDS` | `10` | 密码哈希的 bcrypt 轮次 |
 | `LOG_LEVEL` | `info` | 日志级别：`trace`、`debug`、`info`、`warn`、`error`、`fatal` |
 | `STICKY_TTL_HOURS` | `24` | 带 key 的粘性桶空闲保留小时数（1-87600）。普通 `-sticky` 默认桶永不过期 |
@@ -64,7 +65,7 @@
 | `HE_TUNNEL_ROUTE_TABLE` | `1470` | 隧道流量使用的路由表号，同时用作规则优先级 |
 | `HE_TUNNEL_DEFAULT_ROUTE` | `auto` | `auto` 仅在宿主机没有默认路由时添加；`always` 总是添加；`never` 不改动主路由表 |
 | `HE_TUNNEL_FORWARDING` | `false` | 开启 `net.ipv6.conf.all.forwarding`。仅在需要把前缀转发给其他主机时使用 |
-| `HE_TUNNEL_REGISTER_SUBNETS` | `true` | 启动时把路由前缀注册为可分配子网 |
+| `HE_TUNNEL_REGISTER_SUBNETS` | `true` | 启动时把路由前缀注册为可分配子网。不在此列表里的旧前缀会连同粘性绑定一起删掉 |
 | `HE_TUNNEL_UPDATE_ENDPOINT` | _(有凭据时开启)_ | 启动时把隧道指向本机公网 IPv4 |
 | `HE_TUNNEL_UPDATE_INTERVAL_MS` | `900000` | 公网 IPv4 复查间隔，变化时自动更新。`0` 为关闭，最小值限制为 60 秒 |
 | `HE_TUNNEL_VERIFY` | `true` | 建立完成后探测隧道并报告结果 |

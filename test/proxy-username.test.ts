@@ -143,6 +143,23 @@ test('sticky keys keep independent addresses and expire after 24 hours', () => {
   assert.equal(getCurrentStickyAddress(user.id).length, 0);
 });
 
+test('DETECT_HOST_SUBNETS defaults off and parses booleans', () => {
+  const previous = process.env.DETECT_HOST_SUBNETS;
+  try {
+    delete process.env.DETECT_HOST_SUBNETS;
+    assert.equal(loadConfig().detectHostSubnets, false);
+
+    process.env.DETECT_HOST_SUBNETS = 'true';
+    assert.equal(loadConfig().detectHostSubnets, true);
+
+    process.env.DETECT_HOST_SUBNETS = 'off';
+    assert.equal(loadConfig().detectHostSubnets, false);
+  } finally {
+    if (previous === undefined) delete process.env.DETECT_HOST_SUBNETS;
+    else process.env.DETECT_HOST_SUBNETS = previous;
+  }
+});
+
 test('STICKY_TTL_HOURS configures the keyed bucket idle window', () => {
   const previous = process.env.STICKY_TTL_HOURS;
   try {

@@ -30,20 +30,18 @@ cd ipv6-subnet-proxy
 npm install
 npm run build
 
-# 设置必需的 API Key（子网会从宿主机网卡自动检测）
+# 设置必需的 API Key。默认不使用宿主机网卡上的前缀，
+# 需要时设置 DETECT_HOST_SUBNETS=true。隧道或 WARP 会带上自己的前缀。
 export API_KEY=your-secret-api-key
 
-# 可选：手动指定子网（如果没有检测到，或想补充额外的）
+# 可选：自己指定一个前缀
 export DEFAULT_SUBNET=2001:db8:1::/64
 
 # 启动
 npm start
 ```
 
-启动后，程序会自动从宿主机网络接口检测 IPv6 子网并注册。日志中可以看到类似输出：
-```
-info: Auto-registered detected IPv6 subnet { cidr: "2001:db8:1::/64" }
-```
+设置 `DETECT_HOST_SUBNETS=true` 且没有 `DEFAULT_SUBNET` 时，启动还会登记宿主机网卡上找到的前缀。
 
 ### 验证
 

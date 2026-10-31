@@ -11,6 +11,7 @@ All configuration is via environment variables:
 | `DB_PATH` | `/data/proxy.db` | SQLite database file path |
 | `DEFAULT_SUBNET` | — | Automatically register a subnet on startup (CIDR notation) |
 | `DEFAULT_SUBNET_GATEWAY` | — | Gateway address for the default subnet |
+| `DETECT_HOST_SUBNETS` | `false` | Register IPv6 prefixes found on host interfaces. Off, those prefixes are removed from the pool so sessions are not sourced from an address the upstream does not route |
 | `BCRYPT_ROUNDS` | `10` | bcrypt hash rounds for password hashing |
 | `LOG_LEVEL` | `info` | Logging level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
 | `STICKY_TTL_HOURS` | `24` | Hours an unused keyed sticky bucket is kept (1-87600). The plain `-sticky` default bucket never expires |
@@ -64,7 +65,7 @@ Bring up a tunnelled IPv6 prefix on a host that has none of its own — see [Opt
 | `HE_TUNNEL_ROUTE_TABLE` | `1470` | Routing table for tunnel-sourced traffic, and the rule priority |
 | `HE_TUNNEL_DEFAULT_ROUTE` | `auto` | `auto` adds a default route only if the host has none; `always` adds it regardless; `never` leaves the main table untouched |
 | `HE_TUNNEL_FORWARDING` | `false` | Enable `net.ipv6.conf.all.forwarding`. Only needed to route the prefix onward to other hosts |
-| `HE_TUNNEL_REGISTER_SUBNETS` | `true` | Register the routed prefixes as allocation subnets on startup |
+| `HE_TUNNEL_REGISTER_SUBNETS` | `true` | Register the routed prefixes as allocation subnets on startup. Prefixes no longer in this list are removed, with their sticky bindings |
 | `HE_TUNNEL_UPDATE_ENDPOINT` | _(on with credentials)_ | Point the tunnel at this host's public IPv4 during startup |
 | `HE_TUNNEL_UPDATE_INTERVAL_MS` | `900000` | Re-check the public IPv4 this often and update on change. `0` disables. Clamped to a 60 s minimum |
 | `HE_TUNNEL_VERIFY` | `true` | Probe the tunnel after bring-up and report the result |

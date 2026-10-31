@@ -126,6 +126,12 @@ export interface AppConfig {
   dbPath: string;
   defaultSubnet: string | null;
   defaultSubnetGateway: string | null;
+  /**
+   * Scan host interfaces and register those prefixes as allocation subnets.
+   * Off by default: a host address that is not actually routed upstream times
+   * out, and the tunnel or WARP prefix is the pool unless this is turned on.
+   */
+  detectHostSubnets: boolean;
   bcryptRounds: number;
   logLevel: string;
   /** Hours an unused keyed sticky bucket is kept before cleanup. */
@@ -384,6 +390,7 @@ export function loadConfig(): AppConfig {
     dbPath: process.env.DB_PATH || '/data/proxy.db',
     defaultSubnet: process.env.DEFAULT_SUBNET || null,
     defaultSubnetGateway: process.env.DEFAULT_SUBNET_GATEWAY || null,
+    detectHostSubnets: envBool('DETECT_HOST_SUBNETS', false),
     bcryptRounds: envInt('BCRYPT_ROUNDS', 10),
     logLevel: process.env.LOG_LEVEL || 'info',
     stickyTtlHours,

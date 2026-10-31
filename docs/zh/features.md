@@ -3,7 +3,7 @@
 - **SOCKS5 密码认证** — 完整实现 RFC 1928（SOCKS5）和 RFC 1929（用户名/密码）协议。支持 CONNECT 命令；BIND 和 UDP ASSOCIATE 请求将被拒绝。
 - **内置隧道代理商接入** — 宿主机本身没有 IPv6 也能部署：程序自行建立 6in4 隧道，并从隧道路由的前缀中分配地址。Hurricane Electric 免费提供一个 `/48`，即 2^80 个地址。详见[宿主机没有 IPv6？](/zh/no-ipv6)。
 - **内置 Cloudflare WARP 接入** — 完全免注册的免费 IPv6：程序自行注册 WARP 设备，并为每台设备建立一条 WireGuard 链路，每条链路就是一个可供轮换的出口地址。详见[方案一：Cloudflare WARP](/zh/no-ipv6#方案一cloudflare-warp免注册)。
-- **自动检测子网** — 启动时从宿主机网络接口自动检测 IPv6 子网，无需手动配置
+- **本机子网检测** — 默认关闭，设置 `DETECT_HOST_SUBNETS=true` 才把宿主机网卡上的前缀放进分配池，避免从上游不路由的地址出去
 - **用户级 IPv6 分配** — 一个账号两种行为，由 SOCKS5 用户名选择：`alice` / `alice-random` 每次连接换地址；`alice-sticky` 复用固定地址，`alice-sticky-<key>` 为每个 key 保持独立地址（空闲过期时间可配置，默认 24 小时）
 - **CDN 边缘借用** — 未设置 AAAA 解析的站点，仍可通过其 CDN 的双栈边缘节点经 IPv6 访问；使用前先用证书验证。详见[访问无 IPv6 解析的域名](/zh/ipv4-only)。
 - **自动绑定** — 创建用户时自动绑定所有活跃子网
