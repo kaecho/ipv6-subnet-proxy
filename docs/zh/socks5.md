@@ -37,10 +37,17 @@ alice-sticky-8d3f...     secret123   # 粘性，key 为 8d3f... 的桶
 
 - 换 key 就是换地址。`alice-sticky-a` 与 `alice-sticky-b` 通常会得到不同地址。
 - 绑定多个子网时，一个桶在每个子网各有一个地址。首次连接会选定其中一个已绑定子网，后续连接复用该子网中的地址。
-- 带 key 的桶（`alice-sticky-<key>`）**24 小时**没有使用时会被删除，下一次使用该 key 会重新分配地址；每次复用都会刷新 24 小时计时。
+- 带 key 的桶（`alice-sticky-<key>`）**`STICKY_TTL_HOURS`** 小时没有使用时会被删除（默认 24），下一次使用该 key 会重新分配地址；每次复用都会刷新计时。
 - 普通的 `default` 桶（`alice-sticky`）不会过期，会一直保持地址，直到 `POST /api/v1/users/:id/refresh` 清空。
 - `POST /api/v1/users/:id/refresh` 会清空该账号的全部粘性桶（包括带 key 的桶），这就是原有的 API 换 IP 方式。
 - `GET /api/v1/users/:id/current-ip` 会列出当前桶及其地址。
+
+在容器环境里设置空闲时间，例如 10 天：
+
+```yaml
+environment:
+  - STICKY_TTL_HOURS=240
+```
 
 key 不区分大小写，长度 1-64，字符范围为 `A-Z`、`a-z`、`0-9`、`.`、`_`、`-`，UUID 可以直接使用。若子网是单个 `/128`（例如一台 WARP 设备），该子网只有一个可用地址，所有 key 都会共用这个地址。
 

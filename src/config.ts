@@ -128,6 +128,8 @@ export interface AppConfig {
   defaultSubnetGateway: string | null;
   bcryptRounds: number;
   logLevel: string;
+  /** Hours an unused keyed sticky bucket is kept before cleanup. */
+  stickyTtlHours: number;
   cdnFallback: CdnFallbackConfig;
   tunnel: TunnelConfig;
   warp: WarpConfig;
@@ -369,6 +371,11 @@ export function loadConfig(): AppConfig {
     throw new Error('API_KEY environment variable is required');
   }
 
+  const stickyTtlHours = envInt('STICKY_TTL_HOURS', 24);
+  if (stickyTtlHours < 1 || stickyTtlHours > 87_600) {
+    throw new Error(`STICKY_TTL_HOURS must be 1-87600, got: ${stickyTtlHours}`);
+  }
+
   return {
     socks5Port: envInt('SOCKS5_PORT', 1080),
     apiPort: envInt('API_PORT', 3000),
@@ -379,6 +386,7 @@ export function loadConfig(): AppConfig {
     defaultSubnetGateway: process.env.DEFAULT_SUBNET_GATEWAY || null,
     bcryptRounds: envInt('BCRYPT_ROUNDS', 10),
     logLevel: process.env.LOG_LEVEL || 'info',
+    stickyTtlHours,
     cdnFallback: loadCdnFallbackConfig(),
     tunnel: loadTunnelConfig(),
     warp: loadWarpConfig(),

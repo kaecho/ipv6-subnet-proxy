@@ -43,7 +43,7 @@ SOCKS5: `localhost:1080`, password `secret123` for all of these usernames:
 | `alice-sticky` | Fixed IPv6, switchable with `POST /api/v1/users/:id/refresh` |
 | `alice-sticky-<key>` | Fixed IPv6 per key; changing the key changes the address |
 
-Keyed sticky buckets expire after 24 hours without use; `alice-sticky` lasts until the refresh API is called. See [SOCKS5 usage](https://kaecho.github.io/ipv6-subnet-proxy/socks5).
+Keyed sticky buckets expire after 24 hours without use by default; set `STICKY_TTL_HOURS` to change the window. `alice-sticky` lasts until the refresh API is called. See [SOCKS5 usage](https://kaecho.github.io/ipv6-subnet-proxy/socks5).
 
 > Host networking is required. Compose `sysctls:` do nothing under `network_mode: host` — set `ip_nonlocal_bind` on the **host** as above.
 

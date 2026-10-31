@@ -13,6 +13,7 @@ All configuration is via environment variables:
 | `DEFAULT_SUBNET_GATEWAY` | — | Gateway address for the default subnet |
 | `BCRYPT_ROUNDS` | `10` | bcrypt hash rounds for password hashing |
 | `LOG_LEVEL` | `info` | Logging level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
+| `STICKY_TTL_HOURS` | `24` | Hours an unused keyed sticky bucket is kept (1-87600). The plain `-sticky` default bucket never expires |
 
 ### Cloudflare WARP
 

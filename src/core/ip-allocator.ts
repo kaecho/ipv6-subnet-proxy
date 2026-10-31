@@ -7,11 +7,20 @@ import { getActiveSessions, forceDisconnect } from './sessions';
 import { DEFAULT_STICKY_KEY, type ProxyMode } from './proxy-username';
 
 /**
- * A keyed sticky bucket that has not opened a connection for this long is
- * dropped. Expiry is sliding: every reuse refreshes the timestamp. The plain
+ * Keyed sticky buckets expire after this much idle time by default. The plain
  * `-sticky` default bucket is exempt and lasts until the API refresh clears it.
+ * `STICKY_TTL_HOURS` overrides the duration at startup.
  */
-export const STICKY_BINDING_TTL_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_STICKY_BINDING_TTL_MS = 24 * 60 * 60 * 1000;
+let stickyBindingTtlMs = DEFAULT_STICKY_BINDING_TTL_MS;
+
+/** Set from `STICKY_TTL_HOURS` during startup. */
+export function configureStickyBindingTtl(hours: number): void {
+  if (!Number.isFinite(hours) || hours < 1) {
+    throw new Error(`Sticky binding TTL must be at least 1 hour, got: ${hours}`);
+  }
+  stickyBindingTtlMs = Math.round(hours * 60 * 60 * 1000);
+}
 
 /** Stale rows are swept in the background so an abandoned key cannot pin an address forever. */
 const STICKY_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
@@ -27,7 +36,7 @@ interface StickyRow {
 }
 
 function stickyCutoff(nowMs: number): string {
-  return new Date(nowMs - STICKY_BINDING_TTL_MS).toISOString();
+  return new Date(nowMs - stickyBindingTtlMs).toISOString();
 }
 
 /** Pick subnet for this connect. Sticky reuses a live key bucket; random picks among bindings. */

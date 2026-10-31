@@ -12,17 +12,21 @@ import { parseProxyUsername } from '../src/core/proxy-username';
 import {
   allocateForUser,
   cleanupExpiredStickyBindings,
+  configureStickyBindingTtl,
   getCurrentStickyAddress,
   pickSubnetId,
   refreshUserStickyBindings,
   removeAllStickyBindings,
 } from '../src/core/ip-allocator';
+import { loadConfig } from '../src/config';
 import { addSubnet } from '../src/core/subnets';
 import { getDb } from '../src/database/connection';
 import { runMigrations } from '../src/database/migrations';
 
 const db = getDb(':memory:');
 runMigrations(db);
+
+test.beforeEach(() => configureStickyBindingTtl(24));
 
 test('SOCKS5 username suffixes select allocation mode', () => {
   assert.deepEqual(parseProxyUsername('alice'), {
@@ -136,6 +140,43 @@ test('sticky keys keep independent addresses and expire after 24 hours', () => {
   db.prepare('UPDATE sticky_bindings SET last_used_at = ? WHERE user_id = ?')
     .run(expiredAt, user.id);
   assert.equal(cleanupExpiredStickyBindings(), 2);
+  assert.equal(getCurrentStickyAddress(user.id).length, 0);
+});
+
+test('STICKY_TTL_HOURS configures the keyed bucket idle window', () => {
+  const previous = process.env.STICKY_TTL_HOURS;
+  try {
+    delete process.env.STICKY_TTL_HOURS;
+    assert.equal(loadConfig().stickyTtlHours, 24);
+
+    process.env.STICKY_TTL_HOURS = '240';
+    assert.equal(loadConfig().stickyTtlHours, 240);
+  } finally {
+    if (previous === undefined) delete process.env.STICKY_TTL_HOURS;
+    else process.env.STICKY_TTL_HOURS = previous;
+  }
+});
+
+test('a 240-hour TTL keeps a 25-hour-old bucket and drops it after 241 hours', () => {
+  configureStickyBindingTtl(240);
+  const subnet = addSubnet('2001:db8:2468::/64');
+  const user = createUser({ username: 'long-ttl-user', password: 'secret' });
+  const address = allocateForUser(user.id, subnet.id, 'sticky', 'uuid-long');
+
+  const stale25h = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+  db.prepare(
+    'UPDATE sticky_bindings SET last_used_at = ? WHERE user_id = ? AND sticky_key = ?'
+  ).run(stale25h, user.id, 'uuid-long');
+
+  assert.equal(cleanupExpiredStickyBindings(), 0);
+  assert.equal(allocateForUser(user.id, subnet.id, 'sticky', 'uuid-long'), address);
+
+  const stale241h = new Date(Date.now() - 241 * 60 * 60 * 1000).toISOString();
+  db.prepare(
+    'UPDATE sticky_bindings SET last_used_at = ? WHERE user_id = ? AND sticky_key = ?'
+  ).run(stale241h, user.id, 'uuid-long');
+
+  assert.equal(cleanupExpiredStickyBindings(), 1);
   assert.equal(getCurrentStickyAddress(user.id).length, 0);
 });
 

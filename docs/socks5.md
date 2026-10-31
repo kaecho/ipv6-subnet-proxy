@@ -37,10 +37,17 @@ alice-sticky-8d3f...     secret123   # sticky, bucket 8d3f...
 
 - Switching the key switches the address. Two connections using `alice-sticky-a` and `alice-sticky-b` normally receive different addresses.
 - With several bound subnets, a bucket gets one address per subnet. The first connection picks one of the bound subnets and later connections reuse that subnet's address.
-- A keyed bucket (`alice-sticky-<key>`) that has not been used for **24 hours** is deleted. The next connection using that key gets a fresh address. Reuse refreshes the 24-hour timer.
+- A keyed bucket (`alice-sticky-<key>`) that has not been used for **`STICKY_TTL_HOURS`** (24 by default) is deleted. The next connection using that key gets a fresh address. Reuse refreshes the timer.
 - The plain `default` bucket (`alice-sticky`) does not expire. It keeps its address until `POST /api/v1/users/:id/refresh` clears it.
 - `POST /api/v1/users/:id/refresh` clears every sticky bucket for the account, including keyed buckets. This is the same switch-IP API as before.
 - `GET /api/v1/users/:id/current-ip` lists the current buckets and their addresses.
+
+Set the idle window in the container environment; for example, 10 days:
+
+```yaml
+environment:
+  - STICKY_TTL_HOURS=240
+```
 
 Keys are case-insensitive and limited to 1-64 characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-`. A UUID works as a key. If a subnet is a single `/128` (for example one WARP device), there is only one possible address, so every key on that subnet shares it.
 

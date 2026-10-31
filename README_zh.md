@@ -43,7 +43,7 @@ SOCKS5：`localhost:1080`，以下用户名的密码都是 `secret123`：
 | `alice-sticky` | 固定 IPv6，可通过 `POST /api/v1/users/:id/refresh` 更换 |
 | `alice-sticky-<key>` | 每个 key 一个固定 IPv6；换 key 即换地址 |
 
-带 key 的粘性桶空闲 24 小时后过期；`alice-sticky` 会一直保持到调用 refresh API。详见 [SOCKS5 使用说明](https://kaecho.github.io/ipv6-subnet-proxy/zh/socks5)。
+带 key 的粘性桶默认空闲 24 小时后过期，可用 `STICKY_TTL_HOURS` 修改；`alice-sticky` 会一直保持到调用 refresh API。详见 [SOCKS5 使用说明](https://kaecho.github.io/ipv6-subnet-proxy/zh/socks5)。
 
 > 必须使用 host 网络。`network_mode: host` 下 compose 的 `sysctls:` 无效 —— 请在**宿主机**按上面设置 `ip_nonlocal_bind`。
 

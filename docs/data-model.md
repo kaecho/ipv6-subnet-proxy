@@ -31,7 +31,7 @@
 | `sticky_key` | TEXT | Bucket name from the SOCKS5 username (`default` for plain `-sticky`) |
 | `ipv6_addr` | TEXT | Allocated IPv6 address (full expanded form) |
 | `bound_at` | TEXT | ISO 8601 timestamp |
-| `last_used_at` | TEXT | Last connection time; keyed rows idle for 24 hours are deleted (`default` is exempt) |
+| `last_used_at` | TEXT | Last connection time; keyed rows idle for `STICKY_TTL_HOURS` (24 by default) are deleted (`default` is exempt) |
 
 Unique on `(user_id, subnet_id, sticky_key)`. `sticky_key` and `last_used_at` are added by an automatic migration; existing rows become the `default` bucket.
 

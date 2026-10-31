@@ -5,7 +5,7 @@ import { runMigrations } from './database/migrations';
 import { createSocks5Server } from './socks5/server';
 import { createApiServer } from './api/server';
 import { addSubnet, getSubnetByCidr, bindSubnetToAllUsers, pruneSubnetsBySource } from './core/subnets';
-import { startStickyBindingCleanup } from './core/ip-allocator';
+import { startStickyBindingCleanup, configureStickyBindingTtl } from './core/ip-allocator';
 import { startTunnel, stopTunnel, startEndpointWatcher } from './core/tunnel';
 import { startWarp, stopWarp } from './core/warp';
 import { detectIPv6Subnets, unregisterAllIPv6Addresses, ensureNonlocalBind } from './utils/ipv6';
@@ -32,6 +32,8 @@ async function main(): Promise<void> {
   const log = getLogger();
 
   log.info('Starting IPv6 Subnet Proxy...');
+  configureStickyBindingTtl(config.stickyTtlHours);
+  log.info({ stickyTtlHours: config.stickyTtlHours }, 'Sticky bucket TTL configured');
 
   // Binding a session's source address out of a routed prefix must work even
   // when that /128 is not configured on an interface. Best effort: containers

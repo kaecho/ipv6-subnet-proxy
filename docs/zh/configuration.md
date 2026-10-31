@@ -13,6 +13,7 @@
 | `DEFAULT_SUBNET_GATEWAY` | — | 默认子网的网关地址 |
 | `BCRYPT_ROUNDS` | `10` | 密码哈希的 bcrypt 轮次 |
 | `LOG_LEVEL` | `info` | 日志级别：`trace`、`debug`、`info`、`warn`、`error`、`fatal` |
+| `STICKY_TTL_HOURS` | `24` | 带 key 的粘性桶空闲保留小时数（1-87600）。普通 `-sticky` 默认桶永不过期 |
 
 ### Cloudflare WARP
 
