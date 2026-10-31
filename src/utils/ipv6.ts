@@ -115,6 +115,53 @@ export function generateIPv6(prefix: string, prefixLength: number): string {
   return result.join(':');
 }
 
+function ipv6ToBigInt(addr: string): bigint {
+  const hextets = addr.split(':');
+  let value = 0n;
+  for (const hextet of hextets) {
+    value = (value << 16n) | BigInt(parseInt(hextet || '0', 16));
+  }
+  return value;
+}
+
+function bigIntToIPv6(value: bigint): string {
+  const hextets: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    hextets.unshift((value & 0xffffn).toString(16).padStart(4, '0'));
+    value >>= 16n;
+  }
+  return hextets.join(':');
+}
+
+/**
+ * Derive an address from a seed instead of randomness. The same seed and
+ * prefix always produce the same address, which lets a sticky key name an
+ * address without trusting a cached row to survive cleanup or a restart.
+ */
+export function generateDeterministicIPv6(
+  prefix: string,
+  prefixLength: number,
+  seed: string
+): string {
+  if (prefixLength >= 128) return parseCIDR(`${prefix}/128`).prefix;
+
+  const hostBits = 128 - prefixLength;
+  const hostMask = (1n << BigInt(hostBits)) - 1n;
+  const network = ipv6ToBigInt(prefix) & ~hostMask;
+  const digest = crypto.createHash('sha256').update(seed).digest();
+  let hash = 0n;
+  for (const byte of digest) hash = (hash << 8n) | BigInt(byte);
+
+  let host = hash & hostMask;
+  // Keep the interface ID away from the all-zero/all-ones edges where the
+  // pool is large enough to have interior addresses.
+  if (hostBits > 2) {
+    if (host === 0n) host = 1n;
+    else if (host === hostMask) host = hostMask - 1n;
+  }
+  return bigIntToIPv6(network | host);
+}
+
 export function isReservedIPv6(addr: string): boolean {
   const lower = addr.toLowerCase();
   if (lower === '::1' || lower === '0:0:0:0:0:0:0:1') return true;

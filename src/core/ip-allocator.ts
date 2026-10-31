@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../database/connection';
-import { parseCIDR, generateIPv6, registerIPv6Address, forceUnregisterIPv6Address } from '../utils/ipv6';
+import { parseCIDR, generateIPv6, generateDeterministicIPv6, registerIPv6Address, forceUnregisterIPv6Address } from '../utils/ipv6';
 import { getLogger } from '../utils/logger';
 import { getActiveSessions, forceDisconnect } from './sessions';
 import { DEFAULT_STICKY_KEY, type ProxyMode } from './proxy-username';
@@ -39,6 +39,28 @@ function stickyCutoff(nowMs: number): string {
   return new Date(nowMs - stickyBindingTtlMs).toISOString();
 }
 
+/**
+ * Pick a subnet by rendezvous hashing so a keyed bucket keeps the same subnet
+ * when bindings are stable. Adding or removing a subnet only remaps the keys
+ * for which that subnet wins.
+ */
+function deterministicSubnet(userId: string, stickyKey: string, subnetIds: string[]): string {
+  let chosen = subnetIds[0];
+  let bestScore = '';
+  for (const subnetId of [...subnetIds].sort()) {
+    const score = crypto.createHash('sha256')
+      .update(userId).update('\0')
+      .update(stickyKey).update('\0')
+      .update(subnetId)
+      .digest('hex');
+    if (score > bestScore) {
+      bestScore = score;
+      chosen = subnetId;
+    }
+  }
+  return chosen;
+}
+
 /** Pick subnet for this connect. Sticky reuses a live key bucket; random picks among bindings. */
 export function pickSubnetId(
   userId: string,
@@ -67,6 +89,9 @@ export function pickSubnetId(
       ...subnetIds
     ) as { subnet_id: string } | undefined;
     if (existing) return existing.subnet_id;
+    if (stickyKey !== DEFAULT_STICKY_KEY) {
+      return deterministicSubnet(userId, stickyKey, subnetIds);
+    }
   }
   return subnetIds[crypto.randomInt(subnetIds.length)];
 }
