@@ -457,6 +457,43 @@ function hasLocalRoute(prefix: string): boolean {
   return routed;
 }
 
+/**
+ * True when traffic sourced from any address in `cidr` has a route out of the
+ * host. A pool entry that fails this check hands out addresses whose packets
+ * are dropped on egress: the client sees a connect timeout, and the proxy has
+ * no way to tell that from an unreachable target.
+ *
+ * A prefix is routable when the kernel either has a `local` route for it (the
+ * routed-prefix case used by the tunnel setup) or a normal route whose source
+ * falls inside it (a prefix configured on an interface).
+ */
+export function hasRouteForPrefix(cidr: string): boolean {
+  let normalized: string;
+  let probe: string;
+  try {
+    normalized = normalizeCIDR(cidr);
+    probe = parseCIDR(normalized).prefix;
+  } catch {
+    // A prefix the CIDR parser rejects cannot be allocated from either. Report
+    // it unroutable so the caller drops the pool entry instead of crashing on
+    // startup because one stored row is malformed.
+    return false;
+  }
+  if (hasLocalRoute(normalized)) return true;
+
+  try {
+    const out = execFileSync('ip', ['-6', 'route', 'get', probe], {
+      encoding: 'utf-8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    // `ip route get` reports "RTNETLINK answers: Network is unreachable" on
+    // stderr and exits non-zero when nothing covers the address; execFileSync
+    // throws in that case, so reaching here means a route exists.
+    return out.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** The device an address should be configured on: its pinned prefix, else the default one. */
 export function interfaceForAddress(addr: string): string {
   return prefixEntryForAddress(addr)?.iface ?? getOutboundInterface();

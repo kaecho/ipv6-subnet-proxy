@@ -62,7 +62,7 @@ proto.setServers = () => {};
 
 /** (sni, address) => whether the edge serves that name. */
 let probeAccepts: (sni: string, address: string) => boolean = () => false;
-let probeCalls: { sni: string; address: string; port: number }[] = [];
+let probeCalls: { sni: string; address: string; port: number; localAddress?: string }[] = [];
 
 (tls as any).connect = (opts: any) => {
   const socket: any = new EventEmitter();
@@ -70,7 +70,12 @@ let probeCalls: { sni: string; address: string; port: number }[] = [];
   socket.setTimeout = () => socket;
   socket.destroy = () => socket;
   setImmediate(() => {
-    probeCalls.push({ sni: opts.servername, address: opts.host, port: opts.port });
+    probeCalls.push({
+      sni: opts.servername,
+      address: opts.host,
+      port: opts.port,
+      localAddress: opts.localAddress,
+    });
     if (probeAccepts(opts.servername, opts.host)) {
       socket.authorized = true;
       socket.emit('secureConnect');
@@ -370,4 +375,88 @@ test('the fallback ladder can be disabled entirely', async () => {
 
   await assert.rejects(() => resolveTargetRoute('app.example.com', 443), /no AAAA record/);
   assert.equal(probeCalls.length, 0);
+});
+
+// --- source-aware verification ----------------------------------------------
+
+test('probes bind the same source address the relay will use', async () => {
+  // A borrowed CloudFront edge reachable only from the allocated address.
+  // Verification must run from that address: a default-route probe would
+  // certify an edge this client cannot reach.
+  setup(
+    {
+      a: { 'shop.example.com': ['13.33.1.2'] },
+      cname: { 'shop.example.com': ['d111111abcdef8.cloudfront.net'] },
+      aaaa: { 'd2wy8f7a9ursnm.cloudfront.net': ['2600:9000:2015:1600::1'] },
+    },
+    (sni, address) => sni === 'shop.example.com' && address === '2600:9000:2015:1600::1'
+  );
+
+  const source = '2600:70ff:f892:1::1';
+  const route = await resolveTargetRoute('shop.example.com', 443, source);
+
+  assert.equal(route.kind, 'cdn-borrow');
+  assert.ok(probeCalls.length > 0, 'the edge should have been probed');
+  for (const call of probeCalls) {
+    assert.equal(call.localAddress, source, 'every probe must source from the relay address');
+  }
+});
+
+test('routes are cached per source address', async () => {
+  // Reachability is a property of the source, so two allocated addresses must
+  // not share one cached verification result.
+  let acceptedSource: string | null = null;
+  const proto = tls as any;
+  const originalConnect = proto.connect;
+  proto.connect = ((opts: any) => {
+    const socket: any = new EventEmitter();
+    socket.authorized = false;
+    socket.setTimeout = () => socket;
+    socket.destroy = () => socket;
+    setImmediate(() => {
+      probeCalls.push({
+        sni: opts.servername,
+        address: opts.host,
+        port: opts.port,
+        localAddress: opts.localAddress,
+      });
+      // Only the probed source that matches acceptedSource succeeds.
+      if (opts.localAddress && opts.localAddress === acceptedSource) {
+        socket.authorized = true;
+        socket.emit('secureConnect');
+      } else {
+        socket.emit('error', new Error('handshake failed'));
+      }
+    });
+    return socket;
+  }) as any;
+
+  try {
+    setup({
+      a: { 'shop.example.com': ['13.33.1.2'] },
+      cname: { 'shop.example.com': ['d111111abcdef8.cloudfront.net'] },
+      aaaa: { 'd2wy8f7a9ursnm.cloudfront.net': ['2600:9000:2015:1600::1'] },
+    });
+
+    const first = '2600:70ff:f892:1::1';
+    acceptedSource = first;
+    const routeA = await resolveTargetRoute('shop.example.com', 443, first);
+    assert.equal(routeA.kind, 'cdn-borrow');
+    const probesAfterFirst = probeCalls.length;
+
+    // Same source again: served from cache, no new probes.
+    await resolveTargetRoute('shop.example.com', 443, first);
+    assert.equal(probeCalls.length, probesAfterFirst, 'second resolution for the same source is cached');
+
+    // A different source must re-verify and is allowed to fail.
+    const second = '2600:70ff:f892:2::2';
+    acceptedSource = null;
+    await assert.rejects(
+      () => resolveTargetRoute('shop.example.com', 443, second),
+      /no usable IPv6 path/
+    );
+    assert.ok(probeCalls.length > probesAfterFirst, 'a new source must run its own probes');
+  } finally {
+    proto.connect = originalConnect;
+  }
 });

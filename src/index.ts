@@ -8,7 +8,12 @@ import { addSubnet, getSubnetByCidr, bindSubnetToAllUsers, pruneSubnetsBySource 
 import { startStickyBindingCleanup, configureStickyBindingTtl } from './core/ip-allocator';
 import { startTunnel, stopTunnel, startEndpointWatcher } from './core/tunnel';
 import { startWarp, stopWarp } from './core/warp';
-import { detectIPv6Subnets, unregisterAllIPv6Addresses, ensureNonlocalBind } from './utils/ipv6';
+import {
+  detectIPv6Subnets,
+  unregisterAllIPv6Addresses,
+  ensureNonlocalBind,
+  hasRouteForPrefix,
+} from './utils/ipv6';
 
 /**
  * Register a subnet the proxy brought up itself, and make sure everyone can
@@ -24,6 +29,35 @@ function registerManagedSubnet(cidr: string, source: string): void {
   } catch (err: any) {
     log.warn({ cidr, source, err: err.message }, 'Failed to register subnet');
   }
+}
+
+/**
+ * Drop pool entries whose prefix has no route out of the host. Addresses from
+ * such a prefix cannot reach anything: the kernel drops egress, the client sees
+ * a connect timeout, and the proxy misreports it as a general SOCKS failure.
+ *
+ * Operators can register a prefix by hand (via the API or an earlier tunnel
+ * setup) that the host no longer routes. Verifying at startup keeps those out
+ * of the pool instead of letting them poison a share of all connections.
+ *
+ * Returns the CIDRs that were removed.
+ */
+function dropUnroutableSubnets(log: ReturnType<typeof getLogger>): string[] {
+  const db = getDb();
+  const rows = db.prepare('SELECT id, cidr, source FROM subnets').all() as
+    { id: string; cidr: string; source: string | null }[];
+
+  const removed: string[] = [];
+  for (const row of rows) {
+    if (hasRouteForPrefix(row.cidr)) continue;
+    db.prepare('DELETE FROM subnets WHERE id = ?').run(row.id);
+    removed.push(row.cidr);
+    log.warn(
+      { cidr: row.cidr, source: row.source },
+      'Removed a subnet whose prefix has no route out of the host'
+    );
+  }
+  return removed;
 }
 
 async function main(): Promise<void> {
@@ -146,6 +180,16 @@ async function main(): Promise<void> {
     if (pruned.length > 0) {
       log.info({ count: pruned.length, cidrs: pruned }, 'Dropped WARP addresses that are no longer assigned');
     }
+  }
+
+  // Any prefix left in the pool that the kernel cannot route is dead weight:
+  // sessions sourced from it never reach their target. This catches entries
+  // from earlier configurations (e.g. a routed prefix the broker stopped
+  // advertising, or a host prefix detection used to add), independent of which
+  // subsystem introduced them.
+  const unroutable = dropUnroutableSubnets(log);
+  if (unroutable.length > 0) {
+    log.warn({ count: unroutable.length, cidrs: unroutable }, 'Dropped subnets with no route out of the host');
   }
 
   if (

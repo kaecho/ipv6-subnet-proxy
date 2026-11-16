@@ -179,8 +179,19 @@ async function cnameChain(host: string, maxHops = 8): Promise<string[]> {
  * TLS handshake against `addr` with SNI set to `host` and full certificate
  * verification. Success proves the edge holds a valid certificate for the
  * target name, which is exactly the condition for a borrow to be usable.
+ *
+ * `localAddress` must be the same source the real relay will bind. A probe
+ * sourced from the default address can succeed over a path the client's
+ * allocated address cannot reach, which is exactly how a "verified" edge ends
+ * up timing out on connect.
  */
-function tlsProbe(host: string, addr: string, port: number, timeoutMs: number): Promise<boolean> {
+function tlsProbe(
+  host: string,
+  addr: string,
+  port: number,
+  timeoutMs: number,
+  localAddress?: string
+): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (ok: boolean): void => {
@@ -198,6 +209,7 @@ function tlsProbe(host: string, addr: string, port: number, timeoutMs: number): 
       servername: host,
       rejectUnauthorized: true,
       ALPNProtocols: ['http/1.1'],
+      ...(localAddress ? { localAddress, family: 6 as const } : {}),
     });
     socket.setTimeout(timeoutMs, () => finish(false));
     socket.on('secureConnect', () => finish(socket.authorized));
@@ -211,7 +223,13 @@ function tlsProbe(host: string, addr: string, port: number, timeoutMs: number): 
  * answers 4xx (CloudFront 400, Cloudflare 403 "direct IP access not allowed"),
  * so only sub-400 responses count as proof.
  */
-function httpProbe(host: string, addr: string, port: number, timeoutMs: number): Promise<boolean> {
+function httpProbe(
+  host: string,
+  addr: string,
+  port: number,
+  timeoutMs: number,
+  localAddress?: string
+): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
     let buf = '';
@@ -222,7 +240,12 @@ function httpProbe(host: string, addr: string, port: number, timeoutMs: number):
       resolve(ok);
     };
 
-    const socket = net.createConnection({ host: addr, port, family: 6 });
+    const socket = net.createConnection({
+      host: addr,
+      port,
+      family: 6,
+      ...(localAddress ? { localAddress } : {}),
+    });
     socket.setTimeout(timeoutMs, () => finish(false));
     socket.on('connect', () => {
       socket.write(
@@ -252,10 +275,11 @@ async function probeCandidate(
   host: string,
   addr: string,
   port: number,
-  timeoutMs: number
+  timeoutMs: number,
+  localAddress?: string
 ): Promise<boolean> {
-  if (await tlsProbe(host, addr, port === 80 ? 443 : port, timeoutMs)) return true;
-  if (port === 80) return httpProbe(host, addr, 80, timeoutMs);
+  if (await tlsProbe(host, addr, port === 80 ? 443 : port, timeoutMs, localAddress)) return true;
+  if (port === 80) return httpProbe(host, addr, 80, timeoutMs, localAddress);
   return false;
 }
 
@@ -272,12 +296,16 @@ class ProbeBudget {
 /**
  * Probe candidates concurrently and return the most-preferred one that works,
  * preserving list order rather than whichever handshake happens to finish first.
+ *
+ * `localAddress` is the source the relay will use, so a probe answer means the
+ * client's own address can really reach that edge.
  */
 async function firstWorking(
   host: string,
   port: number,
   candidates: Candidate[],
-  budget: ProbeBudget
+  budget: ProbeBudget,
+  localAddress?: string
 ): Promise<Candidate | null> {
   const c = cfg();
   if (candidates.length === 0) return null;
@@ -289,7 +317,7 @@ async function firstWorking(
   const batch = candidates.slice(0, allowed);
 
   const results = await Promise.all(
-    batch.map((cand) => probeCandidate(host, cand.address, port, c.probeTimeoutMs))
+    batch.map((cand) => probeCandidate(host, cand.address, port, c.probeTimeoutMs, localAddress))
   );
   const idx = results.findIndex((ok) => ok);
   return idx === -1 ? null : { ...batch[idx], verified: true };
@@ -427,7 +455,11 @@ function nat64Route(ipv4Addrs: string[]): TargetRoute | null {
 
 // --- resolution ---
 
-async function computeRoute(host: string, port: number): Promise<TargetRoute> {
+async function computeRoute(
+  host: string,
+  port: number,
+  localAddress?: string
+): Promise<TargetRoute> {
   const c = cfg();
   const log = getLogger();
 
@@ -478,7 +510,7 @@ async function computeRoute(host: string, port: number): Promise<TargetRoute> {
       });
     }
   }
-  const sibling = await firstWorking(host, port, siblings, budget);
+  const sibling = await firstWorking(host, port, siblings, budget, localAddress);
   if (sibling) {
     log.info(
       { host, port, address: sibling.address, via: sibling.via },
@@ -497,7 +529,7 @@ async function computeRoute(host: string, port: number): Promise<TargetRoute> {
       provider: provider.name,
       kind: 'cdn-borrow',
     }));
-    const winner = await firstWorking(host, port, candidates, budget);
+    const winner = await firstWorking(host, port, candidates, budget, localAddress);
     if (winner) {
       log.info(
         { host, port, address: winner.address, provider: provider.name },
@@ -511,7 +543,7 @@ async function computeRoute(host: string, port: number): Promise<TargetRoute> {
   // 4. CDN unknown or mismatched — try whatever edges are on hand.
   if (c.probeAll && budget.remaining > 0) {
     const candidates = await anyProviderCandidates(provider?.name ?? null, budget.remaining);
-    const winner = await firstWorking(host, port, candidates, budget);
+    const winner = await firstWorking(host, port, candidates, budget, localAddress);
     if (winner) {
       log.info(
         { host, port, address: winner.address, provider: winner.provider },
@@ -593,8 +625,17 @@ function cacheRoute(key: string, route: TargetRoute | null, error: string | null
 /**
  * Resolve a SOCKS5 target to the IPv6 address the connection should be made
  * to. Throws when no IPv6 path exists.
+ *
+ * Pass the source address the relay will bind as `localAddress`: probing from
+ * a different source can prove a path the client's address cannot use, and the
+ * cached route is then cached for the wrong egress. Routes are kept per
+ * source so one client's verified edge is never reused for another.
  */
-export async function resolveTargetRoute(host: string, port: number): Promise<TargetRoute> {
+export async function resolveTargetRoute(
+  host: string,
+  port: number,
+  localAddress?: string
+): Promise<TargetRoute> {
   if (net.isIPv6(host)) {
     return { kind: 'literal', addresses: [host], provider: null, via: null, verified: false };
   }
@@ -612,7 +653,7 @@ export async function resolveTargetRoute(host: string, port: number): Promise<Ta
     throw new Error(`Invalid target hostname: ${host}`);
   }
 
-  const key = `${name}|${port}`;
+  const key = routeKey(name, port, localAddress);
   const cached = routeCache.get(key);
   if (cached && cached.expiresAt > Date.now()) {
     if (cached.route) return cached.route;
@@ -623,7 +664,7 @@ export async function resolveTargetRoute(host: string, port: number): Promise<Ta
   const pending = inflight.get(key);
   if (pending) return pending;
 
-  const task = computeRoute(name, port)
+  const task = computeRoute(name, port, localAddress)
     .then((route) => {
       cacheRoute(key, route, null);
       inflight.delete(key);
@@ -637,6 +678,15 @@ export async function resolveTargetRoute(host: string, port: number): Promise<Ta
 
   inflight.set(key, task);
   return task;
+}
+
+/**
+ * Cache key for a route. Verification is source-sensitive: an edge proven
+ * reachable from one allocated address may be unreachable from another, so
+ * the egress is part of the identity of the result.
+ */
+function routeKey(name: string, port: number, localAddress?: string): string {
+  return localAddress ? `${name}|${port}|${localAddress}` : `${name}|${port}`;
 }
 
 /**

@@ -34,6 +34,28 @@ const REP_ADDRESS_TYPE_NOT_SUPPORTED = 0x08;
  */
 const HANDSHAKE_TIMEOUT_MS = 30_000;
 
+/**
+ * How long a target TCP/TLS connect may take before the candidate is given up.
+ * Only covers connection establishment: the timer is cleared on `connect` so a
+ * live relay is never killed for being quiet (SSE streams and thinking phases
+ * can go silent for minutes without the connection being dead).
+ */
+const CONNECT_TIMEOUT_MS = 30_000;
+
+/**
+ * Build the error used when a target connect exceeds CONNECT_TIMEOUT_MS. A
+ * bare `new Error()` has no `code`, which made `mapErrorToReplyCode` fall
+ * through to REP_GENERAL_FAILURE and report a timeout as "general SOCKS server
+ * failure". Setting `code` keeps the reply accurate.
+ */
+export function connectTimeoutError(): NodeJS.ErrnoException {
+  const err: NodeJS.ErrnoException = new Error(
+    `Connection timed out after ${CONNECT_TIMEOUT_MS}ms`
+  );
+  err.code = 'ETIMEDOUT';
+  return err;
+}
+
 export function createSocks5Server(port: number): net.Server {
   const log = getLogger();
 
@@ -192,35 +214,10 @@ export function createSocks5Server(port: number): net.Server {
 
       log.debug({ userId, targetHost, targetPort, mode, stickyKey }, 'SOCKS5 CONNECT');
 
-      // Resolve to a concrete IPv6 address first. Names without an AAAA
-      // record are often still reachable over IPv6 through their CDN, and
-      // names with no path at all should not churn an address allocation
-      // they will never use.
-      let route: TargetRoute;
-      try {
-        route = await resolveTargetRoute(targetHost, targetPort);
-      } catch (err: any) {
-        log.warn({ err: err.message, targetHost, targetPort }, 'No IPv6 route to target');
-        sendReply(clientSocket, REP_HOST_UNREACHABLE);
-        if (!clientSocket.destroyed) {
-          clientSocket.end();
-        }
-        return;
-      }
-
-      // The client may have given up while we were resolving.
-      if (clientSocket.destroyed) return;
-
-      if (route.addresses.length === 0) {
-        log.warn({ targetHost }, 'Resolver returned no addresses');
-        sendReply(clientSocket, REP_HOST_UNREACHABLE);
-        if (!clientSocket.destroyed) {
-          clientSocket.end();
-        }
-        return;
-      }
-
-      // Get user's subnet bindings
+      // The source address has to be known before resolving: CDN edge
+      // verification probes are only meaningful from the address the relay
+      // will actually bind. Probing from the default route can prove a path
+      // the client's allocated address cannot reach.
       const db = getDb();
       const bindings = db.prepare(
         `SELECT usb.subnet_id FROM user_subnet_bindings usb
@@ -250,6 +247,32 @@ export function createSocks5Server(port: number): net.Server {
         return;
       }
 
+      // Resolve to a concrete IPv6 address, probing from the allocated source
+      // so a verified edge is one this client can really reach.
+      let route: TargetRoute;
+      try {
+        route = await resolveTargetRoute(targetHost, targetPort, ipv6Addr);
+      } catch (err: any) {
+        log.warn({ err: err.message, targetHost, targetPort }, 'No IPv6 route to target');
+        sendReply(clientSocket, REP_HOST_UNREACHABLE);
+        if (!clientSocket.destroyed) {
+          clientSocket.end();
+        }
+        return;
+      }
+
+      // The client may have given up while we were resolving.
+      if (clientSocket.destroyed) return;
+
+      if (route.addresses.length === 0) {
+        log.warn({ targetHost }, 'Resolver returned no addresses');
+        sendReply(clientSocket, REP_HOST_UNREACHABLE);
+        if (!clientSocket.destroyed) {
+          clientSocket.end();
+        }
+        return;
+      }
+
       const session = createSession(userId, ipv6Addr, clientSocket);
       sessionId = session.id;
 
@@ -267,11 +290,12 @@ export function createSocks5Server(port: number): net.Server {
           family: 6,
         });
 
-        // Hard timeout: if the connect or first data doesn't happen within
-        // 30 seconds, give up (prevents hanging when target is unreachable).
-        targetSocket.setTimeout(30000, () => {
+        // Hard timeout on connection establishment only. It is cleared in the
+        // `connect` handler below: an established relay must not inherit it,
+        // or a silent stretch on a live SSE stream would be killed after 30s.
+        targetSocket.setTimeout(CONNECT_TIMEOUT_MS, () => {
           if (!targetSocket.destroyed) {
-            targetSocket.destroy(new Error('Connection timed out after 30s'));
+            targetSocket.destroy(connectTimeoutError());
           }
         });
 
@@ -279,6 +303,8 @@ export function createSocks5Server(port: number): net.Server {
 
         targetSocket.on('connect', () => {
           established = true;
+          // The deadline is for connect only; hand the idle timer to nobody.
+          targetSocket.setTimeout(0);
           log.debug(
             { targetHost, address, kind: route.kind, provider: route.provider },
             'Target connected'
@@ -369,7 +395,7 @@ function buildReply(replyCode: number, targetSocket: net.Socket): Buffer {
   return buf;
 }
 
-function mapErrorToReplyCode(err: NodeJS.ErrnoException): number {
+export function mapErrorToReplyCode(err: NodeJS.ErrnoException): number {
   switch (err.code) {
     case 'ENETUNREACH': case 'EHOSTUNREACH': return REP_HOST_UNREACHABLE;
     case 'ECONNREFUSED': return REP_CONNECTION_REFUSED;
